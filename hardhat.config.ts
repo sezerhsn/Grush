@@ -1,12 +1,15 @@
 import { defineConfig, configVariable } from "hardhat/config";
-import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
+
+import hardhatEthers from "@nomicfoundation/hardhat-ethers";
+import hardhatMocha from "@nomicfoundation/hardhat-mocha";
+import hardhatEthersChaiMatchers from "@nomicfoundation/hardhat-ethers-chai-matchers";
+import hardhatNetworkHelpers from "@nomicfoundation/hardhat-network-helpers";
 
 /**
  * Env (önerilen):
  * - SEPOLIA_RPC_URL (veya RPC_URL)
  * - MAINNET_RPC_URL (veya RPC_URL)
  * - DEPLOYER_PRIVATE_KEY (veya PRIVATE_KEY)   // 0x prefiksli ya da prefikssiz olabilir
- * - ETHERSCAN_API_KEY (opsiyonel; verify için)
  */
 
 function envStr(key: string): string | undefined {
@@ -31,25 +34,13 @@ function rpcUrlFor(network: "sepolia" | "mainnet"): string | ReturnType<typeof c
     return envStr("SEPOLIA_RPC_URL") ?? rpc ?? configVariable("SEPOLIA_RPC_URL");
   }
 
-  // mainnet
   return envStr("MAINNET_RPC_URL") ?? rpc ?? configVariable("MAINNET_RPC_URL");
 }
 
-function etherscanApiKey(): string | undefined {
-  return (
-    envStr("ETHERSCAN_API_KEY") ??
-    envStr("ETHERSCAN_KEY") ??
-    envStr("ETHERSCAN_TOKEN") ??
-    envStr("ETHERSCAN_API_KEY_MAINNET") ??
-    envStr("ETHERSCAN_API_KEY_SEPOLIA")
-  );
-}
-
 const accounts = deployerAccounts();
-const etherscanKey = etherscanApiKey();
 
 export default defineConfig({
-  plugins: [hardhatToolboxMochaEthers],
+  plugins: [hardhatEthers, hardhatMocha, hardhatEthersChaiMatchers, hardhatNetworkHelpers],
 
   paths: {
     sources: "./contracts/src",
@@ -68,16 +59,13 @@ export default defineConfig({
   },
 
   networks: {
-    // Local node (npx hardhat node)
     localhost: {
       type: "http",
       chainType: "l1",
       url: envStr("LOCALHOST_RPC_URL") ?? "http://127.0.0.1:8545",
-      // İstersen local node hesabını da bu env ile kullanırsın; yoksa boş kalsın.
       accounts,
     },
 
-    // Ethereum Sepolia
     sepolia: {
       type: "http",
       chainType: "l1",
@@ -86,7 +74,6 @@ export default defineConfig({
       accounts,
     },
 
-    // Ethereum Mainnet
     mainnet: {
       type: "http",
       chainType: "l1",
@@ -95,16 +82,6 @@ export default defineConfig({
       accounts,
     },
   },
-
-  ...(etherscanKey
-    ? {
-        verify: {
-          etherscan: {
-            apiKey: etherscanKey,
-          },
-        },
-      }
-    : {}),
 
   test: {
     mocha: {

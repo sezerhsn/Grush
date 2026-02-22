@@ -15,11 +15,25 @@
   "license": "ISC",
   "type": "module",
   "engines": {
-    "node": ">=22.10.0 <23"
+    "node": ">=22.10.0"
+  },
+  "overrides": {
+    "bn.js": "5.2.3",
+    "diff": "8.0.3",
+    "minimatch": "10.2.1",
+    "lodash-es": "4.17.23"
   },
   "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox-mocha-ethers": "^3.0.2",
+    "@nomicfoundation/hardhat-ethers": "^4.0.4",
+    "@nomicfoundation/hardhat-ethers-chai-matchers": "^3.0.2",
+    "@nomicfoundation/hardhat-mocha": "^3.0.10",
+    "@nomicfoundation/hardhat-network-helpers": "^3.0.3",
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "chai": "^6.2.2",
+    "ethers": "^6.16.0",
     "hardhat": "^3.1.8",
+    "mocha": "^11.7.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },
