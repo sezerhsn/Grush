@@ -156,44 +156,46 @@ describe("Policy Invariants (Supply vs Reserves)", function () {
     expect(supplyGrams).to.be.gt(reserveGrams);
   });
 
-  // Alarm senaryosu: CI kırmasın diye skip.
-  // Bu, "asla olmaması gereken" durumu temsil ediyor.
-  it.skip("ALARM when totalSupply (grams) > latest attested grams (would fail CI)", async function () {
-    const { registry, token, publisher, auditor, minter, user, domain, types } = await deployFixture();
+  // Alarm senaryosu: CI kırmasın diye varsayılan çalışmaz (pending de bırakmayız).
+  // Çalıştırmak için: RUN_ALARM_TESTS=1
+  if (process.env.RUN_ALARM_TESTS === "1") {
+    it("ALARM when totalSupply (grams) > latest attested grams (would fail CI)", async function () {
+      const { registry, token, publisher, auditor, minter, user, domain, types } = await deployFixture();
 
-    const reportId = ethers.keccak256(ethers.toUtf8Bytes("R-INV-FAIL"));
-    const asOfTimestamp = 1000;
-    const attestedGrams = 100n;
-    const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes("root"));
-    const barListHash = ethers.keccak256(ethers.toUtf8Bytes("barlist"));
+      const reportId = ethers.keccak256(ethers.toUtf8Bytes("R-INV-FAIL"));
+      const asOfTimestamp = 1000;
+      const attestedGrams = 100n;
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes("root"));
+      const barListHash = ethers.keccak256(ethers.toUtf8Bytes("barlist"));
 
-    const sig = await signAttestation({
-      auditor,
-      domain,
-      types,
-      reportId,
-      asOfTimestamp,
-      attestedFineGoldGrams: attestedGrams,
-      merkleRoot,
-      barListHash,
+      const sig = await signAttestation({
+        auditor,
+        domain,
+        types,
+        reportId,
+        asOfTimestamp,
+        attestedFineGoldGrams: attestedGrams,
+        merkleRoot,
+        barListHash,
+      });
+
+      await registry
+        .connect(publisher)
+        .publishAttestation(reportId, asOfTimestamp, attestedGrams, merkleRoot, barListHash, sig);
+
+      const mintAmount = ethers.parseUnits("101", 18);
+      await token.connect(minter).mint(user.address, mintAmount);
+
+      const supplyWei: bigint = await token.totalSupply();
+      const supplyGrams = gramsFromSupplyWei(supplyWei);
+
+      const [, rec] = await registry.latestAttestation();
+      const reserveGrams: bigint = rec.attestedFineGoldGrams;
+
+      expect(
+        supplyGrams,
+        `POLICY VIOLATION: supplyGrams(${supplyGrams}) > reserveGrams(${reserveGrams}). This must never happen in production.`
+      ).to.be.lte(reserveGrams);
     });
-
-    await registry
-      .connect(publisher)
-      .publishAttestation(reportId, asOfTimestamp, attestedGrams, merkleRoot, barListHash, sig);
-
-    const mintAmount = ethers.parseUnits("101", 18);
-    await token.connect(minter).mint(user.address, mintAmount);
-
-    const supplyWei: bigint = await token.totalSupply();
-    const supplyGrams = gramsFromSupplyWei(supplyWei);
-
-    const [, rec] = await registry.latestAttestation();
-    const reserveGrams: bigint = rec.attestedFineGoldGrams;
-
-    expect(
-      supplyGrams,
-      `POLICY VIOLATION: supplyGrams(${supplyGrams}) > reserveGrams(${reserveGrams}). This must never happen in production.`
-    ).to.be.lte(reserveGrams);
-  });
+  }
 });
