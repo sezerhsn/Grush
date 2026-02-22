@@ -1,0 +1,19 @@
+{
+  "registry": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "txHash": "0x05cd6acc0821e27851533530f128f352e5c2a9aca91f96d526bceddf5b0c968f",
+  "blockNumber": 3,
+  "reportId": "0xc73480ed2104f17b102cccd5d16c6c3674c9d1780c06db455d327b38bc8d6674",
+  "latestReportId": "0xc73480ed2104f17b102cccd5d16c6c3674c9d1780c06db455d327b38bc8d6674",
+  "latestAttestation": {
+    "reportId": "0xc73480ed2104f17b102cccd5d16c6c3674c9d1780c06db455d327b38bc8d6674",
+    "record": [
+      "1771357527",
+      "1771446965",
+      "1999",
+      "0xd5842d8fdfb3a142e62f9acd63118ee81b538bb3b72a1e5aaf15cceae34cf7d3",
+      "0x6c8bf4298b574077e1c5178580caaebe52a6e51e9a30287c66adafda7577fb46",
+      "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    ]
+  },
+  "getReportIds_999_10_length": 0
+}

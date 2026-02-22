@@ -1,0 +1,7 @@
+.exit
+await ethers.provider.getCode("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+const { ethers } = await hre.network.connect();
+const hre = hreMod.default ?? hreMod;
+const hreMod = await import("hardhat");
+.exit
+await ethers.provider.getCode("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")

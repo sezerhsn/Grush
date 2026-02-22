@@ -1,0 +1,9 @@
+{
+  "schema_version": "0.1",
+  "report_id": "demo-2026-02-18-IST-003",
+  "as_of_timestamp": 1771357600,
+  "bars_count": 2,
+  "attested_fine_gold_grams": 1999,
+  "bar_list_hash": "0x9692704fb2d2806b0c51e1e89c360e01df2b63871d9a514bd8e6fe8e1572bdf7",
+  "merkle_root": "0x57ae9d86a94f0431687054df82d0b2bbf144b185165dd341e22c967bbbea15e1"
+}

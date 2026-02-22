@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grush.org/schemas/por/attestation.schema.json",
+  "title": "GRUSH Attestation Schema v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_id",
+    "as_of_timestamp",
+    "attested_fine_gold_grams",
+    "merkle_root",
+    "bar_list_hash",
+    "chain_id",
+    "reserve_registry_address",
+    "signer_address",
+    "signature_scheme",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "report_id": {
+      "type": "string",
+      "description": "Must match the bar list report_id."
+    },
+    "as_of_timestamp": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Unix epoch seconds for which this attestation is valid."
+    },
+    "attested_fine_gold_grams": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Total fine gold grams attested by signer."
+    },
+    "merkle_root": {
+      "type": "string",
+      "description": "Merkle root of canonical bar list leaves (bytes32 hex).",
+      "pattern": "^0x[a-fA-F0-9]{64}$"
+    },
+    "bar_list_hash": {
+      "type": "string",
+      "description": "Hash of the full bar list file (bytes32 hex). RECOMMENDED: keccak256(file_bytes).",
+      "pattern": "^0x[a-fA-F0-9]{64}$"
+    },
+    "bar_list_uri": {
+      "type": "string",
+      "description": "Optional URI/locator to the bar list snapshot (may be private)."
+    },
+    "chain_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Ethereum chain id (mainnet: 1)."
+    },
+    "reserve_registry_address": {
+      "type": "string",
+      "description": "ReserveRegistry contract address.",
+      "pattern": "^0x[a-fA-F0-9]{40}$"
+    },
+    "signer_address": {
+      "type": "string",
+      "description": "EIP-712 signing address of auditor/custodian.",
+      "pattern": "^0x[a-fA-F0-9]{40}$"
+    },
+    "signature_scheme": {
+      "type": "string",
+      "const": "eip712",
+      "description": "Signature scheme used (v0.1: eip712)."
+    },
+    "eip712_domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "chainId", "verifyingContract"],
+      "properties": {
+        "name": { "type": "string", "const": "GRUSH Reserve Attestation" },
+        "version": { "type": "string", "const": "1" },
+        "chainId": { "type": "integer", "minimum": 1 },
+        "verifyingContract": {
+          "type": "string",
+          "pattern": "^0x[a-fA-F0-9]{40}$"
+        }
+      }
+    },
+    "eip712_types_version": {
+      "type": "string",
+      "const": "0.1",
+      "description": "Version marker for typed data structure."
+    },
+    "signature": {
+      "type": "string",
+      "description": "EIP-712 signature in 0x{r}{s}{v} or standard 65-byte hex form.",
+      "pattern": "^0x[a-fA-F0-9]{130}$"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional extra fields for UX/logging (not part of signature unless explicitly included elsewhere).",
+      "additionalProperties": true
+    }
+  }
+}

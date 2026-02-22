@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grush.org/schemas/por/bar_list.schema.json",
+  "title": "GRUSH Bar List Schema v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_id", "as_of_timestamp", "custodian", "bars"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "report_id": {
+      "type": "string",
+      "description": "Unique identifier for this bar list snapshot (string form). SHOULD be unique across time."
+    },
+    "as_of_timestamp": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Unix epoch seconds for which this snapshot is valid."
+    },
+    "custodian": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "location"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "location": { "type": "string", "minLength": 1 }
+      }
+    },
+    "auditor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "report_ref": { "type": "string" }
+      }
+    },
+    "vaults": {
+      "type": "array",
+      "description": "Optional list of known vault locations used by bars.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["vault_id", "description"],
+        "properties": {
+          "vault_id": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "bars": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Allocated gold bars/ingots list. Each entry MUST represent a uniquely identifiable bar/ingot.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "serial_no",
+          "refiner",
+          "gross_weight_g",
+          "fineness",
+          "fine_weight_g",
+          "vault_id",
+          "allocation_status"
+        ],
+        "properties": {
+          "bar_id": {
+            "type": "string",
+            "description": "Optional internal bar identifier (in addition to serial_no)."
+          },
+          "serial_no": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique serial number engraved on the bar. MUST be unique within the report.",
+            "pattern": "^[A-Za-z0-9\\-_/\\.]+$"
+          },
+          "refiner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Refinery name / brand."
+          },
+          "gross_weight_g": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Gross weight in grams (integer)."
+          },
+          "fineness": {
+            "type": "string",
+            "description": "Fineness of the bar. v0.1 expects 999.9 for fine gold backing.",
+            "pattern": "^[0-9]{3}\\.[0-9]$"
+          },
+          "fine_weight_g": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Fine gold content in grams (integer). MUST be used for reserve totals."
+          },
+          "vault_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Identifier for the vault/custody location."
+          },
+          "location_code": {
+            "type": "string",
+            "description": "Optional location code (branch / city / internal)."
+          },
+          "allocation_status": {
+            "type": "string",
+            "const": "allocated",
+            "description": "MUST be 'allocated' for GRUSH reserves."
+          },
+          "assay_reference": {
+            "type": "string",
+            "description": "Optional reference to assay certificate / report."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Optional notes."
+          }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fine_gold_grams"],
+      "properties": {
+        "fine_gold_grams": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total fine gold grams claimed by this report (optional redundancy; should equal sum(bars[].fine_weight_g))."
+        },
+        "bars_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

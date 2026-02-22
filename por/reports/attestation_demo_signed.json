@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "report_id": "demo-2026-02-18-IST-001",
+  "reportId": "0xc73480ed2104f17b102cccd5d16c6c3674c9d1780c06db455d327b38bc8d6674",
+  "as_of_timestamp": 1771357527,
+  "attested_fine_gold_grams": 1999,
+  "merkle_root": "0xd5842d8fdfb3a142e62f9acd63118ee81b538bb3b72a1e5aaf15cceae34cf7d3",
+  "bar_list_hash": "0x6c8bf4298b574077e1c5178580caaebe52a6e51e9a30287c66adafda7577fb46",
+  "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "signature": "0x8dd79e3e583c158b092de7e65666077726d628740db366c4446af353e3673cc761ff2c631d4aea1ed1f03a989ac63d02e0750ed645ee3d675dcaf88cb65bfee51b",
+  "eip712_domain": {
+    "name": "GRUSH Reserve Attestation",
+    "version": "1",
+    "chainId": "31337",
+    "verifyingContract": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+  }
+}

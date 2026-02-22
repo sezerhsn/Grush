@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.1",
+  "report_id": "demo-2026-02-18-IST-001",
+  "as_of_timestamp": 1771357527,
+  "bar_list_path": "por/reports/bar_list_demo.json",
+  "expected": {
+    "bar_list_hash": "0x6c8bf4298b574077e1c5178580caaebe52a6e51e9a30287c66adafda7577fb46",
+    "merkle_root": "0xd5842d8fdfb3a142e62f9acd63118ee81b538bb3b72a1e5aaf15cceae34cf7d3",
+    "leaf_hashes": {
+      "ABCD-1234": "0x9efb7ee5cca54892d60b035c12912d77549ab4caf8040c1b83dd5045bebbdf84",
+      "BCDE-2345": "0x906cc7c7d3d864a76a31a870d5a3d00eeb9dd88f659738a3fdc619712523d48f"
+    },
+    "proofs": {
+      "ABCD-1234": {
+        "siblings": [
+          "0x906cc7c7d3d864a76a31a870d5a3d00eeb9dd88f659738a3fdc619712523d48f"
+        ],
+        "positions": ["right"]
+      },
+      "BCDE-2345": {
+        "siblings": [
+          "0x9efb7ee5cca54892d60b035c12912d77549ab4caf8040c1b83dd5045bebbdf84"
+        ],
+        "positions": ["left"]
+      }
+    }
+  }
+}

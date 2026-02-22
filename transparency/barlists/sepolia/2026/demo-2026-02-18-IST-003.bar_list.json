@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1",
+  "report_id": "demo-2026-02-18-IST-003",
+  "as_of_timestamp": 1771357600,
+  "custodian": {
+    "name": "Demo Custodian",
+    "location": "Istanbul/TR"
+  },
+  "bars": [
+    {
+      "serial_no": "ABCD-1234",
+      "refiner": "ACME",
+      "vault_id": "IST-VAULT-01",
+      "fine_weight_g": 1000,
+      "fineness": "999.9",
+      "allocation_status": "allocated",
+      "gross_weight_g": 1001
+    },
+    {
+      "serial_no": "BCDE-2345",
+      "refiner": "ACME",
+      "vault_id": "IST-VAULT-01",
+      "fine_weight_g": 999,
+      "fineness": "999.9",
+      "allocation_status": "allocated",
+      "gross_weight_g": 1000
+    }
+  ],
+  "totals": {
+    "fine_gold_grams": 1999,
+    "bars_count": 2
+  }
+}
