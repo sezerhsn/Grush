@@ -1,91 +1,69 @@
-import { defineConfig, configVariable } from "hardhat/config";
+import { defineConfig } from "hardhat/config";
+import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
 
-import hardhatEthers from "@nomicfoundation/hardhat-ethers";
-import hardhatMocha from "@nomicfoundation/hardhat-mocha";
-import hardhatEthersChaiMatchers from "@nomicfoundation/hardhat-ethers-chai-matchers";
-import hardhatNetworkHelpers from "@nomicfoundation/hardhat-network-helpers";
-
-/**
- * Env (önerilen):
- * - SEPOLIA_RPC_URL (veya RPC_URL)
- * - MAINNET_RPC_URL (veya RPC_URL)
- * - DEPLOYER_PRIVATE_KEY (veya PRIVATE_KEY)   // 0x prefiksli ya da prefikssiz olabilir
- */
-
-function envStr(key: string): string | undefined {
-  const v = (process.env[key] || "").trim();
-  return v ? v : undefined;
+function envStr(key: string): string {
+  return (process.env[key] || "").trim();
 }
 
-function normalizePk(pk: string): string {
-  const t = pk.trim();
-  return t.startsWith("0x") ? t : `0x${t}`;
-}
-
-function deployerAccounts(): string[] {
-  const pk = envStr("DEPLOYER_PRIVATE_KEY") ?? envStr("PRIVATE_KEY");
-  return pk ? [normalizePk(pk)] : [];
-}
-
-function rpcUrlFor(network: "sepolia" | "mainnet"): string | ReturnType<typeof configVariable> {
-  const rpc = envStr("RPC_URL");
-
-  if (network === "sepolia") {
-    return envStr("SEPOLIA_RPC_URL") ?? rpc ?? configVariable("SEPOLIA_RPC_URL");
+function envFirst(keys: string[]): { key: string | null; value: string } {
+  for (const k of keys) {
+    const v = envStr(k);
+    if (v) return { key: k, value: v };
   }
-
-  return envStr("MAINNET_RPC_URL") ?? rpc ?? configVariable("MAINNET_RPC_URL");
+  return { key: null, value: "" };
 }
 
-const accounts = deployerAccounts();
+function normalizePrivateKey(pk: string): string {
+  const v = pk.trim();
+  if (!v) return "";
+  return v.startsWith("0x") ? v : `0x${v}`;
+}
+
+// Not: config dosyası yüklenirken hard fail olmasın diye env'ler optional.
+// Sepolia/mainnet çalıştırmadan önce tools/env_guard.ts ile strict kontrol et.
+const sepoliaUrl = envFirst(["SEPOLIA_RPC_URL", "RPC_URL"]).value;
+const sepoliaPk = normalizePrivateKey(envFirst(["PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"]).value);
+
+const mainnetUrl = envFirst(["MAINNET_RPC_URL", "RPC_URL"]).value;
+const mainnetPk = normalizePrivateKey(
+  envFirst(["MAINNET_PRIVATE_KEY", "PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"]).value
+);
 
 export default defineConfig({
-  plugins: [hardhatEthers, hardhatMocha, hardhatEthersChaiMatchers, hardhatNetworkHelpers],
+  plugins: [hardhatToolboxMochaEthers],
 
   paths: {
     sources: "./contracts/src",
-    tests: {
-      mocha: "./contracts/test",
-    },
+    tests: { mocha: "./contracts/test" },
     cache: "./contracts/cache",
     artifacts: "./contracts/artifacts",
   },
 
   solidity: {
-    version: "0.8.24",
+    version: "0.8.25",
     settings: {
       optimizer: { enabled: true, runs: 200 },
+      evmVersion: "cancun",
     },
   },
 
   networks: {
-    localhost: {
-      type: "http",
-      chainType: "l1",
-      url: envStr("LOCALHOST_RPC_URL") ?? "http://127.0.0.1:8545",
-      accounts,
-    },
-
     sepolia: {
       type: "http",
       chainType: "l1",
       chainId: 11155111,
-      url: rpcUrlFor("sepolia"),
-      accounts,
+      url: sepoliaUrl,
+      accounts: sepoliaPk ? [sepoliaPk] : [],
     },
-
+    // Sadece config valid kalsın diye tanımlı; kullanmak zorunda değilsin.
     mainnet: {
       type: "http",
       chainType: "l1",
       chainId: 1,
-      url: rpcUrlFor("mainnet"),
-      accounts,
+      url: mainnetUrl,
+      accounts: mainnetPk ? [mainnetPk] : [],
     },
   },
 
-  test: {
-    mocha: {
-      timeout: 120_000,
-    },
-  },
+  test: { mocha: { timeout: 120_000 } },
 });

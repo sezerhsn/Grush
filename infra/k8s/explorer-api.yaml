@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: explorer-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: explorer-api
+  template:
+    metadata:
+      labels:
+        app: explorer-api
+    spec:
+      containers:
+        - name: explorer-api
+          image: REPLACE_ME
+          ports:
+            - containerPort: 3000

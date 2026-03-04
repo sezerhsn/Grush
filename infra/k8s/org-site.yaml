@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: org-site
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: org-site
+  template:
+    metadata:
+      labels:
+        app: org-site
+    spec:
+      containers:
+        - name: org-site
+          image: REPLACE_ME
+          ports:
+            - containerPort: 3000

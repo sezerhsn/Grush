@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "report_id": "demo-2026-02-18-IST-001",
+  "network": "sepolia",
+  "updated_at": 0,
+  "paths": {
+    "bar_list": "transparency/barlists/demo-2026-02-18-IST-001/bar_list.json",
+    "por_output": "transparency/attestations/demo-2026-02-18-IST-001/por_output.json",
+    "attestation": "transparency/attestations/demo-2026-02-18-IST-001/attestation.json",
+    "publish_receipt": "transparency/attestations/demo-2026-02-18-IST-001/publish_receipt.json",
+    "verification_report": "transparency/attestations/demo-2026-02-18-IST-001/verification_report.json"
+  }
+}

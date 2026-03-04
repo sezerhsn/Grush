@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
-import { ethers, network } from "hardhat";
+import hre from "hardhat";
+const { ethers, network, run } = hre;
 
 function reqEnv(key: string): string {
   const v = process.env[key];

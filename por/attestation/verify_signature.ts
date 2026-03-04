@@ -8,6 +8,21 @@ import {
   assertBytes32Hex,
 } from "../merkle/hash_utils";
 
+const REGISTRY_ABI = [
+  "function exists(bytes32 reportId) external view returns (bool)",
+  "function getAttestation(bytes32 reportId) external view returns (tuple(uint64 asOfTimestamp,uint64 publishedAt,uint256 attestedFineGoldGrams,bytes32 merkleRoot,bytes32 barListHash,address signer))",
+];
+
+type PublishReceipt = {
+  registry?: string;
+  chainId?: number;
+  reportId?: string;
+  report_id?: string;
+  txHash?: string;
+  blockNumber?: number;
+  status?: number;
+};
+
 type Attestation = {
   schema_version: "0.1";
   report_id: string;
@@ -30,10 +45,9 @@ type Attestation = {
 };
 
 function usageAndExit(code = 1): never {
-  // eslint-disable-next-line no-console
   console.error(`
 Usage:
-  ts-node por/attestation/verify_signature.ts --in <attestation.json> [--expect <0xSigner>] [--quiet]
+  ts-node por/attestation/verify_signature.ts --in <attestation.json> [--expect <0xSigner>] [--receipt <publish_receipt.json>] [--rpc <RPC_URL>] [--quiet]
 
 Validates:
 - schema_version == 0.1
@@ -41,6 +55,7 @@ Validates:
 - signature is 65-byte hex
 - EIP-712 domain matches reserve_registry_address + chain_id
 - recovered address matches signer_address (and optionally --expect)
+- OPTIONAL (if receipt exists or --receipt provided): on-chain record matches attestation (requires --rpc or RPC_URL)
 
 Exit codes:
   0 = OK
@@ -67,6 +82,51 @@ function parseArgs(argv: string[]) {
   return args;
 }
 
+function getProvider(rpcUrl: string) {
+  const v6 = (ethers as any).JsonRpcProvider;
+  if (typeof v6 === "function") return new v6(rpcUrl);
+
+  const v5 = (ethers as any).providers?.JsonRpcProvider;
+  if (typeof v5 === "function") return new v5(rpcUrl);
+
+  throw new Error("ethers JsonRpcProvider bulunamadı (ethers v5/v6 uyumsuz?).");
+}
+
+function readJson<T>(p: string): T {
+  const abs = path.isAbsolute(p) ? p : path.join(process.cwd(), p);
+  return JSON.parse(fs.readFileSync(abs, "utf8")) as T;
+}
+
+function tryFindReceiptPath(attAbsPath: string): string | null {
+  const candidates = [
+    path.join(path.dirname(attAbsPath), "publish_receipt.json"),
+    path.join(process.cwd(), "por/reports/publish_receipt.json"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+function coerceAttestationRecord(rec: any) {
+  if (!rec) return null;
+  const asOfTimestamp = (rec.asOfTimestamp ?? rec[0]) as any;
+  const publishedAt = (rec.publishedAt ?? rec[1]) as any;
+  const attestedFineGoldGrams = (rec.attestedFineGoldGrams ?? rec[2]) as any;
+  const merkleRoot = (rec.merkleRoot ?? rec[3]) as any;
+  const barListHash = (rec.barListHash ?? rec[4]) as any;
+  const signer = (rec.signer ?? rec[5]) as any;
+
+  return {
+    asOfTimestamp: asOfTimestamp?.toString?.() ?? asOfTimestamp,
+    publishedAt: publishedAt?.toString?.() ?? publishedAt,
+    attestedFineGoldGrams: attestedFineGoldGrams?.toString?.() ?? attestedFineGoldGrams,
+    merkleRoot,
+    barListHash,
+    signer,
+  };
+}
+
 function assertInteger(n: any, name: string) {
   if (typeof n !== "number" || !Number.isInteger(n)) {
     throw new Error(`${name} integer olmalı. Aldım: ${n}`);
@@ -75,7 +135,7 @@ function assertInteger(n: any, name: string) {
 
 function assertAddress(addr: any, name: string) {
   if (typeof addr !== "string") throw new Error(`${name} string değil.`);
-  normalizeAddress(addr); // will throw if invalid
+  normalizeAddress(addr);
 }
 
 function assertSig65(sig: string) {
@@ -115,11 +175,9 @@ function basicValidate(j: any): Attestation {
 }
 
 function getVerifyTypedDataFn() {
-  // ethers v6: verifyTypedData (top-level)
   const v6 = (ethers as any).verifyTypedData;
   if (typeof v6 === "function") return v6;
 
-  // ethers v5: utils.verifyTypedData
   const v5 = (ethers as any).utils?.verifyTypedData;
   if (typeof v5 === "function") return v5;
 
@@ -134,6 +192,8 @@ async function main() {
   if (!inPath) usageAndExit(1);
 
   const expect = (args.expect as string) || "";
+  const receiptArg = (args.receipt as string) || "";
+  const rpc = (args.rpc as string) || process.env.RPC_URL || "";
   const quiet = Boolean(args.quiet);
 
   const absIn = path.isAbsolute(inPath) ? inPath : path.join(process.cwd(), inPath);
@@ -143,7 +203,6 @@ async function main() {
   const registry = normalizeAddress(att.reserve_registry_address);
   const signer = normalizeAddress(att.signer_address);
 
-  // Domain cross-checks
   if (att.chain_id !== att.eip712_domain.chainId) {
     throw new Error(`chain_id (${att.chain_id}) != domain.chainId (${att.eip712_domain.chainId})`);
   }
@@ -190,9 +249,66 @@ async function main() {
     }
   }
 
+  let onchainOut: any = null;
+  const autoReceipt = receiptArg ? null : tryFindReceiptPath(absIn);
+  const receiptPath = (receiptArg || autoReceipt || "").trim();
+  if (receiptPath) {
+    if (!rpc) {
+      throw new Error(`Receipt bulundu ama RPC yok. --rpc ver veya RPC_URL env set et. receipt=${receiptPath}`);
+    }
+
+    const rc = readJson<PublishReceipt>(receiptPath);
+    const rcRegistry = rc.registry ? normalizeAddress(rc.registry) : "";
+    const rcChainId = rc.chainId;
+    const rcReportId = rc.reportId;
+
+    if (rcRegistry && rcRegistry !== registry) {
+      throw new Error(`Receipt registry mismatch. receipt=${rcRegistry}, attestation=${registry}`);
+    }
+    if (typeof rcChainId === "number" && rcChainId !== att.chain_id) {
+      throw new Error(`Receipt chainId mismatch. receipt=${rcChainId}, attestation.chain_id=${att.chain_id}`);
+    }
+    if (typeof rcReportId === "string" && rcReportId.toLowerCase() !== reportIdToBytes32(att.report_id).toLowerCase()) {
+      throw new Error(`Receipt reportId mismatch. receipt=${rcReportId}, computed=${reportIdToBytes32(att.report_id)}`);
+    }
+
+    const provider = getProvider(rpc);
+    const net = await provider.getNetwork();
+    const chainId = Number((net as any).chainId ?? (net as any).chainId?.toString?.());
+    if (chainId !== att.chain_id) {
+      throw new Error(`RPC chainId mismatch. rpc=${chainId}, attestation.chain_id=${att.chain_id}`);
+    }
+
+    const onchainRegistry = new (ethers as any).Contract(registry, REGISTRY_ABI, provider);
+    const rid = reportIdToBytes32(att.report_id);
+    const exists = await onchainRegistry.exists(rid);
+    if (!exists) throw new Error(`On-chain attestation bulunamadı: reportId=${rid}`);
+
+    const rec = await onchainRegistry.getAttestation(rid);
+    const norm = coerceAttestationRecord(rec);
+
+    if (String(norm.asOfTimestamp) !== String(att.as_of_timestamp)) throw new Error(`On-chain asOfTimestamp mismatch.`);
+    if (String(norm.attestedFineGoldGrams) !== String(att.attested_fine_gold_grams)) throw new Error(`On-chain attestedFineGoldGrams mismatch.`);
+    if (String(norm.merkleRoot).toLowerCase() !== String(att.merkle_root).toLowerCase()) throw new Error(`On-chain merkleRoot mismatch.`);
+    if (String(norm.barListHash).toLowerCase() !== String(att.bar_list_hash).toLowerCase()) throw new Error(`On-chain barListHash mismatch.`);
+    if (normalizeAddress(norm.signer) !== recovered) throw new Error(`On-chain signer mismatch.`);
+
+    onchainOut = {
+      ok: true,
+      receipt_path: receiptPath,
+      receipt: {
+        registry: rc.registry ?? null,
+        chainId: rc.chainId ?? null,
+        txHash: rc.txHash ?? null,
+        blockNumber: rc.blockNumber ?? null,
+        status: rc.status ?? null,
+      },
+      record: norm,
+    };
+  }
+
   if (!quiet) {
-    // eslint-disable-next-line no-console
-    console.log(JSON.stringify({
+    const out: any = {
       ok: true,
       recovered_signer: recovered,
       registry,
@@ -202,13 +318,14 @@ async function main() {
       as_of_timestamp: att.as_of_timestamp,
       attested_fine_gold_grams: att.attested_fine_gold_grams,
       merkle_root: att.merkle_root,
-      bar_list_hash: att.bar_list_hash
-    }, null, 2));
+      bar_list_hash: att.bar_list_hash,
+    };
+    if (onchainOut) out.onchain = onchainOut;
+    console.log(JSON.stringify(out, null, 2));
   }
 }
 
 main().catch((e) => {
-  // eslint-disable-next-line no-console
   console.error("FAIL:", e?.message ?? e);
   process.exit(1);
 });

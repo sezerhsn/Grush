@@ -1,5 +1,7 @@
 /* eslint-disable no-console */
-import { ethers, network, run } from "hardhat";
+import hre from "hardhat";
+import { network } from "hardhat";
+
 import {
   getBookPath,
   loadAddressBook,
@@ -8,10 +10,6 @@ import {
   upsertContract,
   normAddress,
 } from "../../tools/address_book";
-
-/**
- * Deploy ReserveRegistry + initial signer allowlist setup.
- */
 
 type TxOverrides = {
   nonce?: number;
@@ -48,21 +46,17 @@ function envNum(key: string): number | undefined {
   return n;
 }
 
-function envGwei(key: string): bigint | undefined {
-  const v = (process.env[key] || "").trim();
-  if (!v) return undefined;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`${key} invalid gwei: ${v}`);
-  return ethers.parseUnits(v, "gwei");
-}
-
-function buildBaseTxOverrides(): TxOverrides {
+function buildBaseTxOverrides(ethers: any): TxOverrides {
   const gasLimitNum = envNum("GAS_LIMIT");
   const gasLimit = gasLimitNum !== undefined ? BigInt(gasLimitNum) : undefined;
 
-  const gasPrice = envGwei("GAS_PRICE_GWEI");
-  const maxFeePerGas = envGwei("MAX_FEE_GWEI");
-  const maxPriorityFeePerGas = envGwei("MAX_PRIORITY_GWEI");
+  const gasPriceGwei = (process.env.GAS_PRICE_GWEI || "").trim();
+  const maxFeeGwei = (process.env.MAX_FEE_GWEI || "").trim();
+  const maxPrioGwei = (process.env.MAX_PRIORITY_GWEI || "").trim();
+
+  const gasPrice = gasPriceGwei ? ethers.parseUnits(gasPriceGwei, "gwei") : undefined;
+  const maxFeePerGas = maxFeeGwei ? ethers.parseUnits(maxFeeGwei, "gwei") : undefined;
+  const maxPriorityFeePerGas = maxPrioGwei ? ethers.parseUnits(maxPrioGwei, "gwei") : undefined;
 
   if (gasPrice && (maxFeePerGas || maxPriorityFeePerGas)) {
     throw new Error("Fee config invalid: GAS_PRICE_GWEI ile MAX_FEE_GWEI/MAX_PRIORITY_GWEI aynı anda set edilmez.");
@@ -82,34 +76,40 @@ function buildBaseTxOverrides(): TxOverrides {
 function assertMainnetConfirmed(chainId: number) {
   if (chainId !== 1) return;
   const ok = envBool("CONFIRM_MAINNET_DEPLOY", false);
-  if (!ok) {
-    throw new Error("MAINNET LOCK: chainId=1 için CONFIRM_MAINNET_DEPLOY=true set etmeden deploy yok.");
-  }
+  if (!ok) throw new Error("MAINNET LOCK: chainId=1 için CONFIRM_MAINNET_DEPLOY=true olmadan deploy yok.");
 }
 
-function envAddress(key: string, fallback: string, label: string): string {
+function envAddress(ethers: any, key: string, fallback: string, label: string): string {
   const v = process.env[key];
-  return v && v.trim().length > 0 ? normAddress(v.trim(), label) : fallback;
+  const a = v && v.trim().length > 0 ? v.trim() : fallback;
+  if (!ethers.isAddress(a)) throw new Error(`${label} invalid address: ${a}`);
+  return ethers.getAddress(a);
 }
 
-function parseCsvAddresses(csv: string | undefined): string[] {
+function parseCsvAddresses(ethers: any, csv: string | undefined): string[] {
   if (!csv) return [];
   const parts = csv
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  const out = parts.map((p) => normAddress(p, "REGISTRY_ALLOWED_SIGNERS item"));
+
+  const out = parts.map((p) => {
+    if (!ethers.isAddress(p)) throw new Error(`REGISTRY_ALLOWED_SIGNERS invalid: ${p}`);
+    return ethers.getAddress(p);
+  });
+
   return Array.from(new Set(out));
 }
 
-async function maybeVerify(address: string, args: any[]) {
+async function maybeVerify(chainId: number, address: string, args: any[]) {
   const verify = (process.env.VERIFY || "").toLowerCase() === "true";
   if (!verify) return;
-  const name = network.name?.toLowerCase?.() ?? "";
-  if (name === "hardhat" || name === "localhost") return;
+
+  // local'lerde boşver
+  if (chainId === 31337 || chainId === 1337) return;
 
   try {
-    await run("verify:verify", { address, constructorArguments: args });
+    await hre.run("verify:verify", { address, constructorArguments: args });
     console.log(`Verified: ${address}`);
   } catch (e: any) {
     console.log(`Verify skipped/failed (non-fatal): ${e?.message ?? e}`);
@@ -117,6 +117,8 @@ async function maybeVerify(address: string, args: any[]) {
 }
 
 async function main() {
+  // Hardhat 3 + hardhat-ethers: ethers instance network.connect() ile gelir
+  const { ethers } = await network.connect(); // seçilen network: --network sepolia
   const [deployer] = await ethers.getSigners();
   const deployerAddr = await deployer.getAddress();
 
@@ -126,22 +128,22 @@ async function main() {
 
   assertMainnetConfirmed(chainId);
 
-  const baseOverrides = buildBaseTxOverrides();
+  const baseOverrides = buildBaseTxOverrides(ethers);
   const startNonce = envNum("NONCE");
   const nonceManager = new NonceManager(startNonce);
   const confirmations = envNum("TX_CONFIRMATIONS") ?? 1;
 
-  const admin = envAddress("REGISTRY_ADMIN", deployerAddr, "REGISTRY_ADMIN");
-  const publisher = envAddress("REGISTRY_PUBLISHER", deployerAddr, "REGISTRY_PUBLISHER");
-  const pauser = envAddress("REGISTRY_PAUSER", deployerAddr, "REGISTRY_PAUSER");
+  const admin = envAddress(ethers, "REGISTRY_ADMIN", deployerAddr, "REGISTRY_ADMIN");
+  const publisher = envAddress(ethers, "REGISTRY_PUBLISHER", deployerAddr, "REGISTRY_PUBLISHER");
+  const pauser = envAddress(ethers, "REGISTRY_PAUSER", deployerAddr, "REGISTRY_PAUSER");
 
-  const allowedSigners = parseCsvAddresses(process.env.REGISTRY_ALLOWED_SIGNERS);
+  const allowedSigners = parseCsvAddresses(ethers, process.env.REGISTRY_ALLOWED_SIGNERS);
 
   console.log(
     JSON.stringify(
       {
         action: "deploy_reserve_registry",
-        network: network.name,
+        networkHint: process.env.HARDHAT_NETWORK ?? null,
         chainId,
         chainKey,
         deployer: deployerAddr,
@@ -158,7 +160,6 @@ async function main() {
           maxFeePerGasWei: baseOverrides.maxFeePerGas?.toString() ?? null,
           maxPriorityFeePerGasWei: baseOverrides.maxPriorityFeePerGas?.toString() ?? null,
         },
-        confirmMainnetDeploy: chainId === 1 ? true : null,
       },
       null,
       2
@@ -172,7 +173,6 @@ async function main() {
   const registryAddr = await registry.getAddress();
   console.log(`ReserveRegistry deployed: ${registryAddr}`);
 
-  // Initial allowlist
   if (allowedSigners.length > 0) {
     const bools = allowedSigners.map(() => true);
     const tx = await registry
@@ -192,22 +192,19 @@ async function main() {
       )
     );
   } else {
-    console.log(
-      "NOTE: REGISTRY_ALLOWED_SIGNERS boş. publishAttestation çalışmaz; önce setAllowedSigner(true) yapmalısın."
-    );
+    console.log("NOTE: REGISTRY_ALLOWED_SIGNERS boş. publishAttestation çalışmaz; önce setAllowedSigner(true) yapmalısın.");
   }
 
-  // write address book
   const book = loadAddressBook();
   upsertContract(book, chainKey, "ReserveRegistry", {
-    address: registryAddr,
+    address: normAddress(registryAddr, "ReserveRegistry address"),
     args: [admin, publisher, pauser],
     contract: "contracts/src/ReserveRegistry.sol:ReserveRegistry",
   });
   saveAddressBook(book);
   console.log(`Updated ${getBookPath()} -> ${chainKey}.ReserveRegistry`);
 
-  await maybeVerify(registryAddr, [admin, publisher, pauser]);
+  await maybeVerify(chainId, registryAddr, [admin, publisher, pauser]);
 
   console.log(JSON.stringify({ ok: true, reserveRegistry: registryAddr, chainId, chainKey }, null, 2));
 }

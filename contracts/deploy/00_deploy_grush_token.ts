@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
-import { ethers, network, run } from "hardhat";
+import hre from "hardhat";
+const { ethers, network, run } = hre;
 import {
   getBookPath,
   loadAddressBook,

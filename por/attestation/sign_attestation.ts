@@ -9,8 +9,8 @@ type AttestationInput = {
   report_id: string;
   as_of_timestamp: number;
   attested_fine_gold_grams: number;
-  merkle_root: string;      // bytes32 hex
-  bar_list_hash: string;    // bytes32 hex
+  merkle_root: string; // bytes32 hex
+  bar_list_hash: string; // bytes32 hex
 };
 
 function usageAndExit(code = 1): never {
@@ -20,6 +20,9 @@ Usage:
   ts-node por/attestation/sign_attestation.ts --in <por-output.json> --registry <0x..> --chainId 1 --pk <0x..> [--out <attestation.json>]
 
 Alternative (env):
+  SIGNER_PRIVATE_KEY=<hex private key> ts-node por/attestation/sign_attestation.ts --in <por-output.json> --registry <0x..> --chainId 1
+
+Legacy (env):
   ATTESTATION_SIGNER_PK=<hex private key> ts-node por/attestation/sign_attestation.ts --in <por-output.json> --registry <0x..> --chainId 1
 
 Notes:
@@ -69,6 +72,25 @@ function basicValidateInput(j: any): AttestationInput {
   return j as AttestationInput;
 }
 
+function normalizePrivateKey(pk: string): string {
+  const v = (pk || "").trim();
+  if (!v) return "";
+  return v.startsWith("0x") ? v : `0x${v}`;
+}
+
+function resolveSignerPk(argsPk: string): { pk: string; used: "arg" | "SIGNER_PRIVATE_KEY" | "ATTESTATION_SIGNER_PK" | "none" } {
+  const arg = normalizePrivateKey(argsPk || "");
+  if (arg) return { pk: arg, used: "arg" };
+
+  const preferred = normalizePrivateKey(process.env.SIGNER_PRIVATE_KEY || "");
+  if (preferred) return { pk: preferred, used: "SIGNER_PRIVATE_KEY" };
+
+  const legacy = normalizePrivateKey(process.env.ATTESTATION_SIGNER_PK || "");
+  if (legacy) return { pk: legacy, used: "ATTESTATION_SIGNER_PK" };
+
+  return { pk: "", used: "none" };
+}
+
 async function signTypedDataCompat(wallet: any, domain: any, types: any, message: any): Promise<string> {
   // ethers v6: wallet.signTypedData
   if (typeof wallet.signTypedData === "function") {
@@ -92,8 +114,14 @@ async function main() {
 
   if (!inPath || !registry) usageAndExit(1);
 
-  const pk = (args.pk as string) || process.env.ATTESTATION_SIGNER_PK || "";
-  if (!pk) throw new Error("Signer private key yok. --pk ver veya ATTESTATION_SIGNER_PK env set et.");
+  const { pk, used } = resolveSignerPk((args.pk as string) || "");
+  if (!pk) {
+    throw new Error("Signer private key yok. --pk ver veya SIGNER_PRIVATE_KEY (legacy: ATTESTATION_SIGNER_PK) env set et.");
+  }
+  if (used === "ATTESTATION_SIGNER_PK") {
+    // eslint-disable-next-line no-console
+    console.warn("WARN: ATTESTATION_SIGNER_PK (legacy) kullanılıyor. SIGNER_PRIVATE_KEY'e geç.");
+  }
 
   const chainId = Number(chainIdStr);
   if (!Number.isInteger(chainId) || chainId < 1) throw new Error("chainId invalid.");

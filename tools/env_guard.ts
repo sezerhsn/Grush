@@ -49,7 +49,9 @@ RPC env (seçim):
   mainnet: MAINNET_RPC_URL or RPC_URL
 
 Key env (deploy için, public networklerde):
-  DEPLOYER_PRIVATE_KEY or PRIVATE_KEY
+  sepolia: PRIVATE_KEY (fallback: DEPLOYER_PRIVATE_KEY)
+  mainnet: MAINNET_PRIVATE_KEY (fallback: PRIVATE_KEY, DEPLOYER_PRIVATE_KEY)
+  Not: DEPLOYER_PRIVATE_KEY legacy isim; mümkünse PRIVATE_KEY'e geç.
 
 Mainnet lock:
   CONFIRM_MAINNET_DEPLOY=true olmadan mainnet task=deploy/handover geçmez.
@@ -62,6 +64,10 @@ Invariants env:
   RPC_URL (or SEPOLIA_RPC_URL/MAINNET_RPC_URL)
   GRUSH_TOKEN_ADDRESS
   RESERVE_REGISTRY_ADDRESS
+
+PoR scripts (opsiyonel, bu guard kontrol etmiyor):
+  SIGNER_PRIVATE_KEY / (legacy: ATTESTATION_SIGNER_PK)
+  PUBLISHER_PRIVATE_KEY / (legacy: PUBLISHER_PK)
 
 Exit codes:
   0 = OK
@@ -174,6 +180,19 @@ function isLocalNet(n: string): boolean {
   return x === "hardhat" || x === "localhost";
 }
 
+function resolveDeployerKey(network: string): { keyUsed: string | null; pk: string } {
+  const n = network.toLowerCase();
+  const keys = n === "mainnet"
+    ? ["MAINNET_PRIVATE_KEY", "PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"]
+    : ["PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"];
+
+  for (const k of keys) {
+    const v = envStr(k);
+    if (v) return { keyUsed: k, pk: v };
+  }
+  return { keyUsed: null, pk: "" };
+}
+
 function main() {
   const args = parseArgs(process.argv);
   if (args.help) usageAndExit(0);
@@ -237,9 +256,20 @@ function main() {
 
   if (task === "deploy") {
     if (!local) {
-      const pk = envStr("DEPLOYER_PRIVATE_KEY") || envStr("PRIVATE_KEY");
-      if (!pk) errors.push("Missing deployer key: set DEPLOYER_PRIVATE_KEY or PRIVATE_KEY");
-      else {
+      const { keyUsed, pk } = resolveDeployerKey(network);
+      if (!pk) {
+        const hint = network === "mainnet"
+          ? "MAINNET_PRIVATE_KEY (fallback: PRIVATE_KEY, DEPLOYER_PRIVATE_KEY)"
+          : "PRIVATE_KEY (fallback: DEPLOYER_PRIVATE_KEY)";
+        errors.push(`Missing deployer key: set ${hint}`);
+      } else {
+        if (keyUsed === "DEPLOYER_PRIVATE_KEY") {
+          warnings.push("DEPLOYER_PRIVATE_KEY kullanılıyor (legacy). PRIVATE_KEY / MAINNET_PRIVATE_KEY'e geç.");
+        }
+        if (network === "mainnet" && keyUsed !== "MAINNET_PRIVATE_KEY") {
+          warnings.push("Mainnet deploy MAINNET_PRIVATE_KEY ile yapılmalı (ayrı anahtar önerilir). Şu an fallback kullanıyorsun.");
+        }
+
         const p = pk.startsWith("0x") ? pk : `0x${pk}`;
         if (!/^0x[0-9a-fA-F]{64}$/.test(p)) warnings.push("Deployer private key does not look like 32-byte hex.");
       }

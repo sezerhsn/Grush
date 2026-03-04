@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: explorer-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: explorer-indexer
+  template:
+    metadata:
+      labels:
+        app: explorer-indexer
+    spec:
+      containers:
+        - name: explorer-indexer
+          image: REPLACE_ME
+          ports:
+            - containerPort: 3000

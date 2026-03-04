@@ -1,4 +1,14 @@
 {
-  "sepolia": {},
+  "sepolia": {
+    "ReserveRegistry": {
+      "address": "0x8D15C25E0fF24256401Fd4DA6d85301084FC3672",
+      "args": [
+        "0xd2A41bDF76247a858f26A8D0bfb1d09B446725A0",
+        "0xd2A41bDF76247a858f26A8D0bfb1d09B446725A0",
+        "0xd2A41bDF76247a858f26A8D0bfb1d09B446725A0"
+      ],
+      "contract": "contracts/src/ReserveRegistry.sol:ReserveRegistry"
+    }
+  },
   "mainnet": {}
 }

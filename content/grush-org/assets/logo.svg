@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="240" viewBox="0 0 720 240">
+  <rect width="720" height="240" fill="#0b0b0b"></rect>
+  <g fill="#ffffff" font-family="system-ui, -apple-system, Segoe UI, Roboto, Arial" font-weight="700">
+    <text x="48" y="140" font-size="88">GRUSH</text>
+    <text x="50" y="190" font-size="22" opacity="0.75">verify, don’t trust</text>
+  </g>
+</svg>

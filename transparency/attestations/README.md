@@ -43,7 +43,11 @@ Adımlar:
 
 Amaç: değiştirilemez arşiv. Eski dosyalar asla “edit” edilmez; hata varsa yeni `report_id` ile yeni dosya üretilir.
 
-Önerilen düzen (MUST değil ama strongly recommended):
+### M1 (repo’daki demo düzeni) — MUST
+- `transparency/attestations/<report_id>/attestation.json`
+- (publish olduysa) `transparency/attestations/<report_id>/publish_receipt.json`
+
+### İleri düzen (ağ/yıl ayrımı) — MAY
 - `transparency/attestations/<network>/<YYYY>/<report_id>.attestation.json`
 - `transparency/attestations/<network>/<YYYY>/<report_id>.publish_receipt.json`
 
@@ -59,8 +63,17 @@ Not:
 MUST:
 - EIP-712 imzası geçerli mi?
 - Domain doğru mu? (`chain_id` ve `reserve_registry_address` ile bire bir)
-- On-chain publish edilmiş mi?
+- On-chain publish edilmiş mi? (publish yapıldıysa)
 
 Komut örnekleri (Windows/CMD):
+
+M1 düzeni:
 ```bat
-npx ts-node por/attestation/verify_signature.ts --in transparency/attestations/sepolia/2026/<report_id>.attestation.json
+npx tsx por/attestation/verify_signature.ts --in transparency/attestations/<report_id>/attestation.json
+
+---
+
+## Verify the full snapshot
+See `transparency/README.md` or run:
+```bash
+npx tsx tools/verify_transparency_snapshot.ts --report_id <report_id>

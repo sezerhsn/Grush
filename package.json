@@ -1,6 +1,7 @@
 {
   "name": "goldenrush-grush",
   "version": "1.0.0",
+  "private": true,
   "description": "",
   "main": "index.js",
   "directories": {
@@ -8,14 +9,24 @@
   },
   "scripts": {
     "compile": "hardhat compile",
-    "test": "hardhat test"
+    "test": "hardhat test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "ci": "npm run typecheck && npm test",
+    "verify:snapshot": "tsx tools/verify_transparency_snapshot.ts",
+    "por:merkle": "tsx por/merkle/build_merkle_root.ts",
+    "por:sign": "tsx por/attestation/sign_attestation.ts",
+    "por:publish": "tsx por/attestation/publish_onchain.ts",
+    "por:pipeline": "tsx tools/por_pipeline.ts",
+    "contracts:pipeline": "tsx contracts/scripts/run_pipeline.ts",
+    "contracts:verify:sepolia": "hardhat run contracts/scripts/verify_sepolia.ts --network sepolia",
+    "contracts:verify:mainnet": "hardhat run contracts/scripts/verify_mainnet.ts --network mainnet"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "engines": {
-    "node": ">=22.10.0"
+    "node": "22.10.0"
   },
   "overrides": {
     "bn.js": "5.2.3",
@@ -28,6 +39,7 @@
     "@nomicfoundation/hardhat-ethers-chai-matchers": "^3.0.2",
     "@nomicfoundation/hardhat-mocha": "^3.0.10",
     "@nomicfoundation/hardhat-network-helpers": "^3.0.3",
+    "@nomicfoundation/hardhat-toolbox-mocha-ethers": "^3.0.3",
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.10",
     "chai": "^5.3.3",
@@ -35,6 +47,7 @@
     "hardhat": "^3.1.8",
     "mocha": "^11.7.5",
     "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },
   "dependencies": {

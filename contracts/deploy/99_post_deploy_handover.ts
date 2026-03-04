@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { ethers, network } from "hardhat";
+import hre from "hardhat";
+const { ethers, network, run } = hre;
 import {
   loadAddressBook,
   resolveChainKey,

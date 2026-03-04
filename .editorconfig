@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Solidity genelde 4-space
+[*.sol]
+indent_size = 4
+
+# Markdown'da trailing whitespace bazen anlamlı (line break)
+[*.md]
+trim_trailing_whitespace = false
+
+# Windows batch dosyaları CRLF kalsın
+[*.{bat,cmd}]
+end_of_line = crlf

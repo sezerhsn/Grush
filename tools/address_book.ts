@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
 import fs from "fs";
 import path from "path";
-import { ethers } from "hardhat";
+import { ethers } from "ethers";
 
 export type ContractEntry = {
   address: string;

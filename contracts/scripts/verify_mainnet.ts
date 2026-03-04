@@ -1,7 +1,8 @@
 /* eslint-disable no-console */
 import fs from "fs";
 import path from "path";
-import { network, run, ethers } from "hardhat";
+import hre from "hardhat";
+const { ethers, network, run } = hre;
 
 type ContractEntry = {
   address: string;
