@@ -30,5 +30,35 @@
       "contract": "contracts/src/RedemptionGateway.sol:RedemptionGateway"
     }
   },
-  "mainnet": {}
+  "mainnet": {
+    "GRUSHToken": {
+      "address": "0xD7e5B5A9D25879661F7DE92245fE61a6ACB864a5",
+      "args": [
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e",
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e",
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e",
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e"
+      ],
+      "contract": "contracts/src/GRUSHToken.sol:GRUSHToken"
+    },
+    "ReserveRegistry": {
+      "address": "0xf29b88e7e4086D648a6ee68803e9D402302cce54",
+      "args": [
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e",
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e",
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e"
+      ],
+      "contract": "contracts/src/ReserveRegistry.sol:ReserveRegistry"
+    },
+    "RedemptionGateway": {
+      "address": "0xeaB372518CAD1C0f030868f03C34E1125ABA4bfF",
+      "args": [
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e",
+        "0xD7e5B5A9D25879661F7DE92245fE61a6ACB864a5",
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e",
+        "0x1754d4495E17889b34b8973c2A225e50a9a3431e"
+      ],
+      "contract": "contracts/src/RedemptionGateway.sol:RedemptionGateway"
+    }
+  }
 }
