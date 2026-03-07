@@ -1,5 +1,5 @@
 {
-  "name": "goldenrush-grush",
+  "name": "goldenrush",
   "version": "1.0.0",
   "private": true,
   "description": "",
@@ -35,16 +35,16 @@
     "lodash-es": "4.17.23"
   },
   "devDependencies": {
-    "@nomicfoundation/hardhat-ethers": "^4.0.4",
+    "@nomicfoundation/hardhat-ethers": "4.0.6",
     "@nomicfoundation/hardhat-ethers-chai-matchers": "^3.0.2",
-    "@nomicfoundation/hardhat-mocha": "^3.0.10",
+    "@nomicfoundation/hardhat-mocha": "3.0.12",
     "@nomicfoundation/hardhat-network-helpers": "^3.0.3",
     "@nomicfoundation/hardhat-toolbox-mocha-ethers": "^3.0.3",
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.10",
     "chai": "^5.3.3",
     "ethers": "^6.16.0",
-    "hardhat": "^3.1.8",
+    "hardhat": "3.1.11",
     "mocha": "^11.7.5",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
