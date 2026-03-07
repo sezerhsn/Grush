@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
+import process, { loadEnvFile } from "node:process";
 
 type StepKey = "token" | "registry" | "gateway" | "handover" | "verify";
 
@@ -24,6 +25,18 @@ type ParsedArgs = Record<string, string | boolean>;
 type AddressBookCheckReport = {
   issues?: unknown[];
 };
+
+function tryLoadEnvFile(): void {
+  const explicit = (process.env.ENV_FILE || "").trim();
+  const candidate = explicit
+    ? (path.isAbsolute(explicit) ? explicit : path.join(process.cwd(), explicit))
+    : path.join(process.cwd(), ".env");
+
+  if (!fs.existsSync(candidate)) return;
+
+  loadEnvFile(candidate);
+  console.log(`ENV: loaded ${candidate}`);
+}
 
 function parseArgs(argv: string[]): ParsedArgs {
   const args: ParsedArgs = {};
@@ -122,6 +135,14 @@ function npxCmd(): string {
   return isWin() ? "npx.cmd" : "npx";
 }
 
+function assertSafeNetworkName(networkName: string): void {
+  const v = networkName.trim();
+  if (!v) throw new Error("Missing --network");
+  if (!/^[A-Za-z0-9_-]+$/.test(v)) {
+    throw new Error(`Invalid --network value: ${networkName}`);
+  }
+}
+
 function hardhatRun(networkName: string, scriptPath: string): void {
   const cmd = npxCmd();
   const args = ["hardhat", "run", scriptPath, "--network", networkName];
@@ -130,7 +151,8 @@ function hardhatRun(networkName: string, scriptPath: string): void {
 
   const res = spawnSync(cmd, args, {
     stdio: "inherit",
-    shell: false,
+    shell: isWin(),
+    windowsHide: isWin(),
     env: process.env,
   });
 
@@ -245,7 +267,8 @@ function runAddressBookCheck(chainKey: string, strict: boolean): void {
 
   const res = spawnSync(cmd, args, {
     stdio: ["ignore", "pipe", "pipe"],
-    shell: false,
+    shell: isWin(),
+    windowsHide: isWin(),
     env: process.env,
     encoding: "utf8",
   });
@@ -425,11 +448,13 @@ function buildSteps(networkName: string, includeVerify: boolean): Step[] {
 }
 
 function main(): void {
+  tryLoadEnvFile();
+
   const args = parseArgs(process.argv);
   if (args.help) usageAndExit(0);
 
   const networkName = typeof args.network === "string" ? args.network : "";
-  if (!networkName) usageAndExit(1);
+  assertSafeNetworkName(networkName);
 
   const noVerify = args.noVerify === true;
   const noPreflight = args.noPreflight === true;
