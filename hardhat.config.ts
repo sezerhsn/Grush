@@ -2,15 +2,15 @@ import { defineConfig } from "hardhat/config";
 import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
 
 function envStr(key: string): string {
-  return (process.env[key] || "").trim();
+  return (process.env[key] ?? "").trim();
 }
 
-function envFirst(keys: string[]): { key: string | null; value: string } {
-  for (const k of keys) {
-    const v = envStr(k);
-    if (v) return { key: k, value: v };
+function envFirst(keys: string[]): string {
+  for (const key of keys) {
+    const value = envStr(key);
+    if (value) return value;
   }
-  return { key: null, value: "" };
+  return "";
 }
 
 function normalizePrivateKey(pk: string): string {
@@ -19,15 +19,40 @@ function normalizePrivateKey(pk: string): string {
   return v.startsWith("0x") ? v : `0x${v}`;
 }
 
-// Not: config dosyası yüklenirken hard fail olmasın diye env'ler optional.
-// Sepolia/mainnet çalıştırmadan önce tools/env_guard.ts ile strict kontrol et.
-const sepoliaUrl = envFirst(["SEPOLIA_RPC_URL", "RPC_URL"]).value;
-const sepoliaPk = normalizePrivateKey(envFirst(["PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"]).value);
+const sepoliaUrl = envFirst(["SEPOLIA_RPC_URL", "RPC_URL"]);
+const sepoliaPk = normalizePrivateKey(envFirst(["PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"]));
 
-const mainnetUrl = envFirst(["MAINNET_RPC_URL", "RPC_URL"]).value;
+const mainnetUrl = envFirst(["MAINNET_RPC_URL", "RPC_URL"]);
 const mainnetPk = normalizePrivateKey(
-  envFirst(["MAINNET_PRIVATE_KEY", "PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"]).value
+  envFirst(["MAINNET_PRIVATE_KEY", "PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"])
 );
+
+// URL yoksa network'ü hiç tanımlama.
+// Böylece local compile/test, RPC URL zorunluluğu olmadan ayağa kalkar.
+const networks = {
+  ...(sepoliaUrl
+    ? {
+        sepolia: {
+          type: "http" as const,
+          chainType: "l1" as const,
+          chainId: 11155111,
+          url: sepoliaUrl,
+          accounts: sepoliaPk ? [sepoliaPk] : [],
+        },
+      }
+    : {}),
+  ...(mainnetUrl
+    ? {
+        mainnet: {
+          type: "http" as const,
+          chainType: "l1" as const,
+          chainId: 1,
+          url: mainnetUrl,
+          accounts: mainnetPk ? [mainnetPk] : [],
+        },
+      }
+    : {}),
+};
 
 export default defineConfig({
   plugins: [hardhatToolboxMochaEthers],
@@ -47,23 +72,11 @@ export default defineConfig({
     },
   },
 
-  networks: {
-    sepolia: {
-      type: "http",
-      chainType: "l1",
-      chainId: 11155111,
-      url: sepoliaUrl,
-      accounts: sepoliaPk ? [sepoliaPk] : [],
-    },
-    // Sadece config valid kalsın diye tanımlı; kullanmak zorunda değilsin.
-    mainnet: {
-      type: "http",
-      chainType: "l1",
-      chainId: 1,
-      url: mainnetUrl,
-      accounts: mainnetPk ? [mainnetPk] : [],
+  ...(Object.keys(networks).length > 0 ? { networks } : {}),
+
+  test: {
+    mocha: {
+      timeout: 120_000,
     },
   },
-
-  test: { mocha: { timeout: 120_000 } },
 });

@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import hre from "hardhat";
-const { ethers, network, run } = hre;
+import { network } from "hardhat";
+
 import {
   getBookPath,
   loadAddressBook,
@@ -23,17 +24,43 @@ type TxOverrides = {
   maxPriorityFeePerGas?: bigint;
 };
 
+type GrantRoleTx = {
+  hash: string;
+  wait: (confirmations?: number) => Promise<{ status?: number | null } | null>;
+};
+
+type GRUSHTokenRoleLike = {
+  BURNER_ROLE: () => Promise<string>;
+  connect: (signer: unknown) => GRUSHTokenRoleLike;
+  grantRole: (role: string, account: string, overrides?: TxOverrides) => Promise<GrantRoleTx>;
+};
+
+type VerifyTaskArgs = {
+  address: string;
+  constructorArguments: unknown[];
+};
+
+type VerifyTaskRunner = {
+  run: (taskName: string, taskArgs: VerifyTaskArgs) => Promise<unknown>;
+};
+
 class NonceManager {
   private next?: number;
+
   constructor(start?: number) {
     this.next = start;
   }
+
   public with(overrides: TxOverrides): TxOverrides {
     if (this.next === undefined) return overrides;
     const o: TxOverrides = { ...overrides, nonce: this.next };
     this.next += 1;
     return o;
   }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function envBool(key: string, def = false): boolean {
@@ -50,7 +77,10 @@ function envNum(key: string): number | undefined {
   return n;
 }
 
-function envGwei(key: string): bigint | undefined {
+function envGwei(
+  ethers: { parseUnits: (value: string, unit: string) => bigint },
+  key: string
+): bigint | undefined {
   const v = (process.env[key] || "").trim();
   if (!v) return undefined;
   const n = Number(v);
@@ -58,19 +88,26 @@ function envGwei(key: string): bigint | undefined {
   return ethers.parseUnits(v, "gwei");
 }
 
-function buildBaseTxOverrides(): TxOverrides {
+function buildBaseTxOverrides(
+  ethers: { parseUnits: (value: string, unit: string) => bigint }
+): TxOverrides {
   const gasLimitNum = envNum("GAS_LIMIT");
   const gasLimit = gasLimitNum !== undefined ? BigInt(gasLimitNum) : undefined;
 
-  const gasPrice = envGwei("GAS_PRICE_GWEI");
-  const maxFeePerGas = envGwei("MAX_FEE_GWEI");
-  const maxPriorityFeePerGas = envGwei("MAX_PRIORITY_GWEI");
+  const gasPrice = envGwei(ethers, "GAS_PRICE_GWEI");
+  const maxFeePerGas = envGwei(ethers, "MAX_FEE_GWEI");
+  const maxPriorityFeePerGas = envGwei(ethers, "MAX_PRIORITY_GWEI");
 
   if (gasPrice && (maxFeePerGas || maxPriorityFeePerGas)) {
-    throw new Error("Fee config invalid: GAS_PRICE_GWEI ile MAX_FEE_GWEI/MAX_PRIORITY_GWEI aynı anda set edilmez.");
+    throw new Error(
+      "Fee config invalid: GAS_PRICE_GWEI ile MAX_FEE_GWEI/MAX_PRIORITY_GWEI aynı anda set edilmez."
+    );
   }
+
   if ((maxFeePerGas && !maxPriorityFeePerGas) || (!maxFeePerGas && maxPriorityFeePerGas)) {
-    throw new Error("Fee config invalid: EIP-1559 için MAX_FEE_GWEI ve MAX_PRIORITY_GWEI birlikte set edilmeli.");
+    throw new Error(
+      "Fee config invalid: EIP-1559 için MAX_FEE_GWEI ve MAX_PRIORITY_GWEI birlikte set edilmeli."
+    );
   }
 
   const o: TxOverrides = {};
@@ -81,7 +118,7 @@ function buildBaseTxOverrides(): TxOverrides {
   return o;
 }
 
-function assertMainnetConfirmed(chainId: number) {
+function assertMainnetConfirmed(chainId: number): void {
   if (chainId !== 1) return;
   const ok = envBool("CONFIRM_MAINNET_DEPLOY", false);
   if (!ok) {
@@ -94,21 +131,28 @@ function envAddress(key: string, fallback: string, label: string): string {
   return v && v.trim().length > 0 ? normAddress(v.trim(), label) : fallback;
 }
 
-async function maybeVerify(address: string, args: any[]) {
+async function runVerifyTask(taskArgs: VerifyTaskArgs): Promise<void> {
+  const runner = hre as unknown as VerifyTaskRunner;
+  await runner.run("verify:verify", taskArgs);
+}
+
+async function maybeVerify(chainId: number, address: string, args: unknown[]): Promise<void> {
   const verify = (process.env.VERIFY || "").toLowerCase() === "true";
   if (!verify) return;
-  const name = network.name?.toLowerCase?.() ?? "";
-  if (name === "hardhat" || name === "localhost") return;
+
+  if (chainId === 31337 || chainId === 1337) return;
 
   try {
-    await run("verify:verify", { address, constructorArguments: args });
+    await runVerifyTask({ address, constructorArguments: args });
     console.log(`Verified: ${address}`);
-  } catch (e: any) {
-    console.log(`Verify skipped/failed (non-fatal): ${e?.message ?? e}`);
+  } catch (err: unknown) {
+    console.log(`Verify skipped/failed (non-fatal): ${errorMessage(err)}`);
   }
 }
 
-async function main() {
+async function main(): Promise<void> {
+  const { ethers } = await network.connect();
+
   const [deployer] = await ethers.getSigners();
   const deployerAddr = await deployer.getAddress();
 
@@ -118,7 +162,7 @@ async function main() {
 
   assertMainnetConfirmed(chainId);
 
-  const baseOverrides = buildBaseTxOverrides();
+  const baseOverrides = buildBaseTxOverrides(ethers);
   const startNonce = envNum("NONCE");
   const nonceManager = new NonceManager(startNonce);
   const confirmations = envNum("TX_CONFIRMATIONS") ?? 1;
@@ -127,7 +171,6 @@ async function main() {
   const operator = envAddress("GATEWAY_OPERATOR", deployerAddr, "GATEWAY_OPERATOR");
   const pauser = envAddress("GATEWAY_PAUSER", deployerAddr, "GATEWAY_PAUSER");
 
-  // token address: env > address book
   let tokenAddrEnv = (process.env.GRUSH_TOKEN_ADDRESS || "").trim();
   if (!tokenAddrEnv) {
     const book = loadAddressBook();
@@ -144,7 +187,7 @@ async function main() {
     JSON.stringify(
       {
         action: "deploy_redemption_gateway",
-        network: network.name,
+        networkHint: process.env.HARDHAT_NETWORK ?? null,
         chainId,
         chainKey,
         deployer: deployerAddr,
@@ -169,21 +212,31 @@ async function main() {
   );
 
   const RedemptionGateway = await ethers.getContractFactory("RedemptionGateway");
-  const gateway = await RedemptionGateway.deploy(admin, tokenAddr, operator, pauser, nonceManager.with(baseOverrides));
+  const gateway = await RedemptionGateway.deploy(
+    admin,
+    tokenAddr,
+    operator,
+    pauser,
+    nonceManager.with(baseOverrides)
+  );
   await gateway.waitForDeployment();
 
-  const gatewayAddr = await gateway.getAddress();
+  const gatewayAddr = normAddress(await gateway.getAddress(), "RedemptionGateway address");
   console.log(`RedemptionGateway deployed: ${gatewayAddr}`);
 
-  // Grant BURNER_ROLE to gateway
-  const token = await ethers.getContractAt("GRUSHToken", tokenAddr);
+  const token = (await ethers.getContractAt(
+    "GRUSHToken",
+    tokenAddr
+  )) as unknown as GRUSHTokenRoleLike;
   const BURNER_ROLE = await token.BURNER_ROLE();
 
   try {
     const tx = await token
       .connect(deployer)
       .grantRole(BURNER_ROLE, gatewayAddr, nonceManager.with(baseOverrides));
+
     const rc = await tx.wait(confirmations);
+
     console.log(
       JSON.stringify(
         {
@@ -197,14 +250,13 @@ async function main() {
         2
       )
     );
-  } catch (e: any) {
+  } catch (err: unknown) {
     console.log(
-      `WARN: grantRole failed (non-fatal). Muhtemelen token admin deployer değil (timelock/multisig). Error: ${e?.message ?? e}`
+      `WARN: grantRole failed (non-fatal). Muhtemelen token admin deployer değil (timelock/multisig). Error: ${errorMessage(err)}`
     );
     console.log("NOTE: BURNER_ROLE'ü gateway'e timelock/multisig üzerinden manuel ver.");
   }
 
-  // write address book
   const book = loadAddressBook();
   upsertContract(book, chainKey, "RedemptionGateway", {
     address: gatewayAddr,
@@ -214,12 +266,14 @@ async function main() {
   saveAddressBook(book);
   console.log(`Updated ${getBookPath()} -> ${chainKey}.RedemptionGateway`);
 
-  await maybeVerify(gatewayAddr, [admin, tokenAddr, operator, pauser]);
+  await maybeVerify(chainId, gatewayAddr, [admin, tokenAddr, operator, pauser]);
 
-  console.log(JSON.stringify({ ok: true, redemptionGateway: gatewayAddr, chainId, chainKey }, null, 2));
+  console.log(
+    JSON.stringify({ ok: true, redemptionGateway: gatewayAddr, chainId, chainKey }, null, 2)
+  );
 }
 
-main().catch((err) => {
-  console.error("DEPLOY FAIL:", err?.message ?? err);
+main().catch((err: unknown) => {
+  console.error("DEPLOY FAIL:", errorMessage(err));
   process.exit(1);
 });

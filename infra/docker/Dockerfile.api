@@ -1,8 +1,33 @@
-FROM node:20-alpine
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev || npm i
-COPY . .
+# syntax=docker/dockerfile:1.7
+
+ARG NODE_IMAGE=node:22.10.0-bullseye-slim
+
+FROM ${NODE_IMAGE} AS base
 ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+WORKDIR /app
+
+FROM base AS deps
+WORKDIR /app/services/api
+COPY services/api/package.json ./
+COPY services/api/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+FROM base AS builder
+WORKDIR /app/services/api
+COPY --from=deps /app/services/api/node_modules ./node_modules
+COPY services/api ./
+RUN npm run build
+
+FROM base AS runner
+WORKDIR /app/services/api
+COPY --from=builder --chown=node:node /app/services/api/public ./public
+COPY --from=builder --chown=node:node /app/services/api/.next ./.next
+COPY --from=builder --chown=node:node /app/services/api/package.json ./package.json
+COPY --from=deps --chown=node:node /app/services/api/node_modules ./node_modules
+
+USER node
+EXPOSE 3000
 CMD ["npm","run","start"]
-# Dockerfile.api

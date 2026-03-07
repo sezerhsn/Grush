@@ -1,1 +1,60 @@
-# TODO: fill config
+name: grush-explorer
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: grush_explorer
+      POSTGRES_USER: grush
+      POSTGRES_PASSWORD: grush
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: node:22.10.0-bullseye-slim
+    profiles: ["explorer"]
+    working_dir: /app
+    volumes:
+      - ../api:/app:rw
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: ./env.explorer
+        required: false
+    environment:
+      DATABASE_URL: postgres://grush:grush@db:5432/grush_explorer
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    command: ["sh", "-lc", "echo 'TODO: implement explorer/api'; sleep infinity"]
+    ports:
+      - "3100:3000"
+    restart: unless-stopped
+
+  indexer:
+    image: node:22.10.0-bullseye-slim
+    profiles: ["explorer"]
+    working_dir: /app
+    volumes:
+      - ../indexer:/app:rw
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: ./env.explorer
+        required: false
+    environment:
+      DATABASE_URL: postgres://grush:grush@db:5432/grush_explorer
+    command: ["sh", "-lc", "echo 'TODO: implement explorer/indexer'; sleep infinity"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:

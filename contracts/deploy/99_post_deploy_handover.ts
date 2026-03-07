@@ -1,7 +1,6 @@
 /* eslint-disable no-console */
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import hre from "hardhat";
-const { ethers, network, run } = hre;
+import { network } from "hardhat";
+
 import {
   loadAddressBook,
   resolveChainKey,
@@ -21,17 +20,52 @@ type TxOverrides = {
   maxPriorityFeePerGas?: bigint;
 };
 
+type ContractTx = {
+  hash: string;
+  wait: (confirmations?: number) => Promise<{ status?: number | null } | null>;
+};
+
+type RoleManagedContractLike = {
+  hasRole: (role: string, who: string) => Promise<boolean>;
+  grantRole: (role: string, who: string, overrides?: TxOverrides) => Promise<ContractTx>;
+  renounceRole: (role: string, who: string, overrides?: TxOverrides) => Promise<ContractTx>;
+  connect: (signer: unknown) => RoleManagedContractLike;
+};
+
+type GRUSHTokenLike = RoleManagedContractLike & {
+  MINTER_ROLE: () => Promise<string>;
+  BURNER_ROLE: () => Promise<string>;
+  PAUSER_ROLE: () => Promise<string>;
+};
+
+type ReserveRegistryLike = RoleManagedContractLike & {
+  isAllowedSigner: (signer: string) => Promise<boolean>;
+  setAllowedSigners: (
+    signers: string[],
+    allowed: boolean[],
+    overrides?: TxOverrides
+  ) => Promise<ContractTx>;
+};
+
+type RedemptionGatewayLike = RoleManagedContractLike;
+
 class NonceManager {
   private next?: number;
+
   constructor(start?: number) {
     this.next = start;
   }
+
   public with(overrides: TxOverrides): TxOverrides {
     if (this.next === undefined) return overrides;
     const o: TxOverrides = { ...overrides, nonce: this.next };
     this.next += 1;
     return o;
   }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function envBool(key: string, def: boolean): boolean {
@@ -44,31 +78,45 @@ function envNum(key: string): number | undefined {
   const v = (process.env[key] || "").trim();
   if (!v) return undefined;
   const n = Number(v);
-  if (!Number.isFinite(n)) throw new Error(`${key} invalid number: ${v}`);
+  if (!Number.isFinite(n)) {
+    throw new Error(`${key} invalid number: ${v}`);
+  }
   return n;
 }
 
-function envGwei(key: string): bigint | undefined {
+function envGwei(
+  ethers: { parseUnits: (value: string, unit: string) => bigint },
+  key: string
+): bigint | undefined {
   const v = (process.env[key] || "").trim();
   if (!v) return undefined;
   const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`${key} invalid gwei: ${v}`);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`${key} invalid gwei: ${v}`);
+  }
   return ethers.parseUnits(v, "gwei");
 }
 
-function buildBaseTxOverrides(): TxOverrides {
+function buildBaseTxOverrides(
+  ethers: { parseUnits: (value: string, unit: string) => bigint }
+): TxOverrides {
   const gasLimitNum = envNum("GAS_LIMIT");
   const gasLimit = gasLimitNum !== undefined ? BigInt(gasLimitNum) : undefined;
 
-  const gasPrice = envGwei("GAS_PRICE_GWEI");
-  const maxFeePerGas = envGwei("MAX_FEE_GWEI");
-  const maxPriorityFeePerGas = envGwei("MAX_PRIORITY_GWEI");
+  const gasPrice = envGwei(ethers, "GAS_PRICE_GWEI");
+  const maxFeePerGas = envGwei(ethers, "MAX_FEE_GWEI");
+  const maxPriorityFeePerGas = envGwei(ethers, "MAX_PRIORITY_GWEI");
 
   if (gasPrice && (maxFeePerGas || maxPriorityFeePerGas)) {
-    throw new Error("Fee config invalid: GAS_PRICE_GWEI ile MAX_FEE_GWEI/MAX_PRIORITY_GWEI aynı anda set edilmez.");
+    throw new Error(
+      "Fee config invalid: GAS_PRICE_GWEI ile MAX_FEE_GWEI/MAX_PRIORITY_GWEI aynı anda set edilmez."
+    );
   }
+
   if ((maxFeePerGas && !maxPriorityFeePerGas) || (!maxFeePerGas && maxPriorityFeePerGas)) {
-    throw new Error("Fee config invalid: EIP-1559 için MAX_FEE_GWEI ve MAX_PRIORITY_GWEI birlikte set edilmeli.");
+    throw new Error(
+      "Fee config invalid: EIP-1559 için MAX_FEE_GWEI ve MAX_PRIORITY_GWEI birlikte set edilmeli."
+    );
   }
 
   const o: TxOverrides = {};
@@ -79,8 +127,9 @@ function buildBaseTxOverrides(): TxOverrides {
   return o;
 }
 
-function assertMainnetConfirmed(chainId: number) {
+function assertMainnetConfirmed(chainId: number): void {
   if (chainId !== 1) return;
+
   const ok = envBool("CONFIRM_MAINNET_DEPLOY", false);
   if (!ok) {
     throw new Error("MAINNET LOCK: chainId=1 için CONFIRM_MAINNET_DEPLOY=true set etmeden işlem yok.");
@@ -100,20 +149,33 @@ function envAddrOr(key: string, fallback: string): string {
 
 function parseCsvAddresses(csv?: string): string[] {
   if (!csv) return [];
+
   const parts = csv
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
     .map((s) => normAddress(s, "CSV item"));
+
   return Array.from(new Set(parts));
 }
 
-async function hasRole(ac: any, role: string, who: string): Promise<boolean> {
-  return await ac.hasRole(role, who);
+function isActiveAddress(
+  ethers: { isAddress: (value: string) => boolean; ZeroAddress: string },
+  address?: string
+): address is string {
+  return !!address && ethers.isAddress(address) && address !== ethers.ZeroAddress;
+}
+
+async function hasRole(
+  ac: RoleManagedContractLike,
+  role: string,
+  who: string
+): Promise<boolean> {
+  return ac.hasRole(role, who);
 }
 
 async function ensureGrant(
-  ac: any,
+  ac: RoleManagedContractLike,
   role: string,
   who: string,
   label: string,
@@ -121,63 +183,69 @@ async function ensureGrant(
   txo: TxOverrides,
   nm: NonceManager,
   confirmations: number
-) {
+): Promise<void> {
   const ok = await hasRole(ac, role, who);
   if (ok) {
     console.log(`OK: ${label} already granted -> ${who}`);
     return;
   }
+
   if (dryRun) {
     console.log(`DRY_RUN: would grant ${label} -> ${who}`);
     return;
   }
+
   const tx = await ac.grantRole(role, who, nm.with(txo));
   const rc = await tx.wait(confirmations);
   console.log(`GRANT: ${label} -> ${who} tx=${tx.hash} status=${rc?.status}`);
 }
 
 async function ensureRenounce(
-  ac: any,
+  ac: RoleManagedContractLike,
   role: string,
   who: string,
   label: string,
-  signer: any,
+  signer: unknown,
   dryRun: boolean,
   txo: TxOverrides,
   nm: NonceManager,
   confirmations: number
-) {
+): Promise<void> {
   const ok = await hasRole(ac, role, who);
   if (!ok) {
     console.log(`OK: ${label} not present on ${who}`);
     return;
   }
+
   if (dryRun) {
     console.log(`DRY_RUN: would renounce ${label} by ${who}`);
     return;
   }
+
   const tx = await ac.connect(signer).renounceRole(role, who, nm.with(txo));
   const rc = await tx.wait(confirmations);
   console.log(`RENOUNCE: ${label} by ${who} tx=${tx.hash} status=${rc?.status}`);
 }
 
 async function ensureAllowedSigners(
-  registry: any,
+  registry: ReserveRegistryLike,
   signers: string[],
   dryRun: boolean,
   txo: TxOverrides,
   nm: NonceManager,
   confirmations: number
-) {
+): Promise<void> {
   if (signers.length === 0) {
     console.log("NOTE: REGISTRY_ALLOWED_SIGNERS empty; skip allowlist.");
     return;
   }
 
   const toEnable: string[] = [];
-  for (const s of signers) {
-    const allowed = await registry.isAllowedSigner(s);
-    if (!allowed) toEnable.push(s);
+  for (const signer of signers) {
+    const allowed = await registry.isAllowedSigner(signer);
+    if (!allowed) {
+      toEnable.push(signer);
+    }
   }
 
   if (toEnable.length === 0) {
@@ -196,7 +264,9 @@ async function ensureAllowedSigners(
   console.log(`ALLOWLIST: enabled ${toEnable.length} signer(s) tx=${tx.hash} status=${rc?.status}`);
 }
 
-async function main() {
+async function main(): Promise<void> {
+  const { ethers } = await network.connect();
+
   const [deployer] = await ethers.getSigners();
   const deployerAddr = normAddress(await deployer.getAddress(), "deployer");
 
@@ -210,7 +280,9 @@ async function main() {
   const cleanupDeployer = envBool("CLEANUP_DEPLOYER", true);
 
   const multisig = envAddr("MULTISIG_ADDRESS");
-  if (!multisig) throw new Error("Missing env: MULTISIG_ADDRESS");
+  if (!multisig) {
+    throw new Error("Missing env: MULTISIG_ADDRESS");
+  }
 
   const timelock = envAddr("TIMELOCK_ADDRESS");
   const adminTarget = timelock ?? multisig;
@@ -219,12 +291,11 @@ async function main() {
   const registrySigners = parseCsvAddresses(process.env.REGISTRY_ALLOWED_SIGNERS);
   const ensureGatewayBurner = envBool("ENSURE_GATEWAY_BURNER", true);
 
-  const baseOverrides = buildBaseTxOverrides();
+  const baseOverrides = buildBaseTxOverrides(ethers);
   const startNonce = envNum("NONCE");
   const nonceManager = new NonceManager(startNonce);
   const confirmations = envNum("TX_CONFIRMATIONS") ?? 1;
 
-  // Ops overrides (default multisig)
   const tokenMinterTarget = envAddrOr("TOKEN_MINTER_TARGET", multisig);
   const tokenBurnerTarget = envAddrOr("TOKEN_BURNER_TARGET", multisig);
   const tokenPauserTarget = envAddrOr("TOKEN_PAUSER_TARGET", multisig);
@@ -246,7 +317,7 @@ async function main() {
     JSON.stringify(
       {
         action: "post_deploy_handover",
-        network: network.name,
+        networkHint: process.env.HARDHAT_NETWORK ?? null,
         chainId,
         chainKey,
         addressBookPath: bookPath,
@@ -279,106 +350,332 @@ async function main() {
     )
   );
 
-  // -------------------------
-  // GRUSHToken handover
-  // -------------------------
-  if (tokenEntry?.address && ethers.isAddress(tokenEntry.address) && tokenEntry.address !== ethers.ZeroAddress) {
+  if (isActiveAddress(ethers, tokenEntry?.address)) {
     const tokenAddr = normAddress(tokenEntry.address, "GRUSHToken.address");
     console.log(`\n=== GRUSHToken @ ${tokenAddr} ===`);
 
-    const token = await ethers.getContractAt("GRUSHToken", tokenAddr);
+    const token = (await ethers.getContractAt(
+      "GRUSHToken",
+      tokenAddr
+    )) as unknown as GRUSHTokenLike;
 
     const MINTER_ROLE = await token.MINTER_ROLE();
     const BURNER_ROLE = await token.BURNER_ROLE();
     const PAUSER_ROLE = await token.PAUSER_ROLE();
 
-    await ensureGrant(token, ZERO_ROLE, adminTarget, "TOKEN.DEFAULT_ADMIN_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-    await ensureGrant(token, MINTER_ROLE, tokenMinterTarget, "TOKEN.MINTER_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-    await ensureGrant(token, BURNER_ROLE, tokenBurnerTarget, "TOKEN.BURNER_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-    await ensureGrant(token, PAUSER_ROLE, tokenPauserTarget, "TOKEN.PAUSER_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
+    await ensureGrant(
+      token,
+      ZERO_ROLE,
+      adminTarget,
+      "TOKEN.DEFAULT_ADMIN_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      token,
+      MINTER_ROLE,
+      tokenMinterTarget,
+      "TOKEN.MINTER_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      token,
+      BURNER_ROLE,
+      tokenBurnerTarget,
+      "TOKEN.BURNER_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      token,
+      PAUSER_ROLE,
+      tokenPauserTarget,
+      "TOKEN.PAUSER_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
 
-    // Optional: ensure gateway has burner role
-    if (ensureGatewayBurner && gatewayEntry?.address && ethers.isAddress(gatewayEntry.address) && gatewayEntry.address !== ethers.ZeroAddress) {
+    if (ensureGatewayBurner && isActiveAddress(ethers, gatewayEntry?.address)) {
       const gwAddr = normAddress(gatewayEntry.address, "RedemptionGateway.address");
-      const has = await token.hasRole(BURNER_ROLE, gwAddr);
-      if (!has) {
+      const hasGatewayRole = await token.hasRole(BURNER_ROLE, gwAddr);
+
+      if (!hasGatewayRole) {
         console.log(`NOTE: gateway missing TOKEN.BURNER_ROLE -> ${gwAddr}`);
-        await ensureGrant(token, BURNER_ROLE, gwAddr, "TOKEN.BURNER_ROLE (gateway)", dryRun, baseOverrides, nonceManager, confirmations);
+        await ensureGrant(
+          token,
+          BURNER_ROLE,
+          gwAddr,
+          "TOKEN.BURNER_ROLE (gateway)",
+          dryRun,
+          baseOverrides,
+          nonceManager,
+          confirmations
+        );
       } else {
         console.log("OK: gateway already has TOKEN.BURNER_ROLE");
       }
     }
 
     if (cleanupDeployer) {
-      await ensureRenounce(token, MINTER_ROLE, deployerAddr, "TOKEN.MINTER_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(token, BURNER_ROLE, deployerAddr, "TOKEN.BURNER_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(token, PAUSER_ROLE, deployerAddr, "TOKEN.PAUSER_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(token, ZERO_ROLE, deployerAddr, "TOKEN.DEFAULT_ADMIN_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
+      await ensureRenounce(
+        token,
+        MINTER_ROLE,
+        deployerAddr,
+        "TOKEN.MINTER_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        token,
+        BURNER_ROLE,
+        deployerAddr,
+        "TOKEN.BURNER_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        token,
+        PAUSER_ROLE,
+        deployerAddr,
+        "TOKEN.PAUSER_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        token,
+        ZERO_ROLE,
+        deployerAddr,
+        "TOKEN.DEFAULT_ADMIN_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
     }
   } else {
     console.log("\nSKIP: GRUSHToken not found in address book for this chain.");
   }
 
-  // -------------------------
-  // ReserveRegistry handover
-  // -------------------------
-  if (registryEntry?.address && ethers.isAddress(registryEntry.address) && registryEntry.address !== ethers.ZeroAddress) {
+  if (isActiveAddress(ethers, registryEntry?.address)) {
     const registryAddr = normAddress(registryEntry.address, "ReserveRegistry.address");
     console.log(`\n=== ReserveRegistry @ ${registryAddr} ===`);
 
-    const registry = await ethers.getContractAt("ReserveRegistry", registryAddr);
+    const registry = (await ethers.getContractAt(
+      "ReserveRegistry",
+      registryAddr
+    )) as unknown as ReserveRegistryLike;
 
     const PUBLISHER_ROLE = ethers.id("PUBLISHER_ROLE");
     const PAUSER_ROLE = ethers.id("PAUSER_ROLE");
     const SIGNER_ADMIN_ROLE = ethers.id("SIGNER_ADMIN_ROLE");
 
-    await ensureGrant(registry, ZERO_ROLE, adminTarget, "REGISTRY.DEFAULT_ADMIN_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-    await ensureGrant(registry, SIGNER_ADMIN_ROLE, adminTarget, "REGISTRY.SIGNER_ADMIN_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-
-    await ensureGrant(registry, PUBLISHER_ROLE, registryPublisherTarget, "REGISTRY.PUBLISHER_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-    await ensureGrant(registry, PAUSER_ROLE, registryPauserTarget, "REGISTRY.PAUSER_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
+    await ensureGrant(
+      registry,
+      ZERO_ROLE,
+      adminTarget,
+      "REGISTRY.DEFAULT_ADMIN_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      registry,
+      SIGNER_ADMIN_ROLE,
+      adminTarget,
+      "REGISTRY.SIGNER_ADMIN_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      registry,
+      PUBLISHER_ROLE,
+      registryPublisherTarget,
+      "REGISTRY.PUBLISHER_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      registry,
+      PAUSER_ROLE,
+      registryPauserTarget,
+      "REGISTRY.PAUSER_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
 
     if (setRegistrySigners) {
       try {
-        await ensureAllowedSigners(registry, registrySigners, dryRun, baseOverrides, nonceManager, confirmations);
-      } catch (e: any) {
+        await ensureAllowedSigners(
+          registry,
+          registrySigners,
+          dryRun,
+          baseOverrides,
+          nonceManager,
+          confirmations
+        );
+      } catch (err: unknown) {
         console.log(
-          `WARN: setAllowedSigners failed (non-fatal). Muhtemelen deployer SIGNER_ADMIN_ROLE değil. Error: ${e?.message ?? e}`
+          `WARN: setAllowedSigners failed (non-fatal). Muhtemelen deployer SIGNER_ADMIN_ROLE değil. Error: ${errorMessage(
+            err
+          )}`
         );
         console.log("NOTE: Bu adımı timelock/multisig üzerinden yapmalısın.");
       }
     }
 
     if (cleanupDeployer) {
-      await ensureRenounce(registry, PUBLISHER_ROLE, deployerAddr, "REGISTRY.PUBLISHER_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(registry, PAUSER_ROLE, deployerAddr, "REGISTRY.PAUSER_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(registry, SIGNER_ADMIN_ROLE, deployerAddr, "REGISTRY.SIGNER_ADMIN_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(registry, ZERO_ROLE, deployerAddr, "REGISTRY.DEFAULT_ADMIN_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
+      await ensureRenounce(
+        registry,
+        PUBLISHER_ROLE,
+        deployerAddr,
+        "REGISTRY.PUBLISHER_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        registry,
+        PAUSER_ROLE,
+        deployerAddr,
+        "REGISTRY.PAUSER_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        registry,
+        SIGNER_ADMIN_ROLE,
+        deployerAddr,
+        "REGISTRY.SIGNER_ADMIN_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        registry,
+        ZERO_ROLE,
+        deployerAddr,
+        "REGISTRY.DEFAULT_ADMIN_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
     }
   } else {
     console.log("\nSKIP: ReserveRegistry not found in address book for this chain.");
   }
 
-  // -------------------------
-  // RedemptionGateway handover
-  // -------------------------
-  if (gatewayEntry?.address && ethers.isAddress(gatewayEntry.address) && gatewayEntry.address !== ethers.ZeroAddress) {
+  if (isActiveAddress(ethers, gatewayEntry?.address)) {
     const gatewayAddr = normAddress(gatewayEntry.address, "RedemptionGateway.address");
     console.log(`\n=== RedemptionGateway @ ${gatewayAddr} ===`);
 
-    const gateway = await ethers.getContractAt("RedemptionGateway", gatewayAddr);
+    const gateway = (await ethers.getContractAt(
+      "RedemptionGateway",
+      gatewayAddr
+    )) as unknown as RedemptionGatewayLike;
 
     const OPERATOR_ROLE = ethers.id("OPERATOR_ROLE");
     const PAUSER_ROLE = ethers.id("PAUSER_ROLE");
 
-    await ensureGrant(gateway, ZERO_ROLE, adminTarget, "GATEWAY.DEFAULT_ADMIN_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-    await ensureGrant(gateway, OPERATOR_ROLE, gatewayOperatorTarget, "GATEWAY.OPERATOR_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
-    await ensureGrant(gateway, PAUSER_ROLE, gatewayPauserTarget, "GATEWAY.PAUSER_ROLE", dryRun, baseOverrides, nonceManager, confirmations);
+    await ensureGrant(
+      gateway,
+      ZERO_ROLE,
+      adminTarget,
+      "GATEWAY.DEFAULT_ADMIN_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      gateway,
+      OPERATOR_ROLE,
+      gatewayOperatorTarget,
+      "GATEWAY.OPERATOR_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
+    await ensureGrant(
+      gateway,
+      PAUSER_ROLE,
+      gatewayPauserTarget,
+      "GATEWAY.PAUSER_ROLE",
+      dryRun,
+      baseOverrides,
+      nonceManager,
+      confirmations
+    );
 
     if (cleanupDeployer) {
-      await ensureRenounce(gateway, OPERATOR_ROLE, deployerAddr, "GATEWAY.OPERATOR_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(gateway, PAUSER_ROLE, deployerAddr, "GATEWAY.PAUSER_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
-      await ensureRenounce(gateway, ZERO_ROLE, deployerAddr, "GATEWAY.DEFAULT_ADMIN_ROLE", deployer, dryRun, baseOverrides, nonceManager, confirmations);
+      await ensureRenounce(
+        gateway,
+        OPERATOR_ROLE,
+        deployerAddr,
+        "GATEWAY.OPERATOR_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        gateway,
+        PAUSER_ROLE,
+        deployerAddr,
+        "GATEWAY.PAUSER_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
+      await ensureRenounce(
+        gateway,
+        ZERO_ROLE,
+        deployerAddr,
+        "GATEWAY.DEFAULT_ADMIN_ROLE",
+        deployer,
+        dryRun,
+        baseOverrides,
+        nonceManager,
+        confirmations
+      );
     }
   } else {
     console.log("\nSKIP: RedemptionGateway not found in address book for this chain.");
@@ -387,7 +684,7 @@ async function main() {
   console.log("\nDONE: post_deploy_handover");
 }
 
-main().catch((e) => {
-  console.error("HANDOVER FAIL:", e?.message ?? e);
+main().catch((err: unknown) => {
+  console.error("HANDOVER FAIL:", errorMessage(err));
   process.exit(1);
 });

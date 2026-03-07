@@ -1,7 +1,63 @@
 import { expect } from "chai";
 import hre from "hardhat";
+import type {
+  ContractRunner,
+  ContractTransactionResponse,
+  TypedDataDomain,
+  TypedDataField,
+} from "ethers";
+import { Signature } from "ethers";
 
 const { ethers } = await hre.network.connect();
+
+type TypedDataTypes = Record<string, TypedDataField[]>;
+
+type TypedDataSignerLike = ContractRunner & {
+  address: string;
+  signTypedData?: (
+    domain: TypedDataDomain,
+    types: TypedDataTypes,
+    value: Record<string, unknown>
+  ) => Promise<string>;
+  _signTypedData?: (
+    domain: TypedDataDomain,
+    types: TypedDataTypes,
+    value: Record<string, unknown>
+  ) => Promise<string>;
+};
+
+type GRUSHTokenLike = {
+  getAddress(): Promise<string>;
+  waitForDeployment(): Promise<GRUSHTokenLike>;
+  connect(runner: ContractRunner | null): GRUSHTokenLike;
+
+  name(): Promise<string>;
+  nonces(owner: string): Promise<bigint>;
+  MINTER_ROLE(): Promise<string>;
+  BURNER_ROLE(): Promise<string>;
+  PAUSER_ROLE(): Promise<string>;
+  hasRole(role: string, account: string): Promise<boolean>;
+  balanceOf(account: string): Promise<bigint>;
+  allowance(owner: string, spender: string): Promise<bigint>;
+  paused(): Promise<boolean>;
+
+  mint(to: string, amount: bigint): Promise<ContractTransactionResponse>;
+  burn(amount: bigint): Promise<ContractTransactionResponse>;
+  burnFrom(from: string, amount: bigint): Promise<ContractTransactionResponse>;
+  approve(spender: string, amount: bigint): Promise<ContractTransactionResponse>;
+  permit(
+    owner: string,
+    spender: string,
+    value: bigint,
+    deadline: bigint,
+    v: number,
+    r: string,
+    s: string
+  ): Promise<ContractTransactionResponse>;
+  pause(): Promise<ContractTransactionResponse>;
+  unpause(): Promise<ContractTransactionResponse>;
+  transfer(to: string, amount: bigint): Promise<ContractTransactionResponse>;
+};
 
 async function getChainId(): Promise<number> {
   const net = await ethers.provider.getNetwork();
@@ -9,42 +65,34 @@ async function getChainId(): Promise<number> {
 }
 
 function sigToVRS(sig: string): { v: number; r: string; s: string } {
-  // ethers v6
-  const Sig = (ethers as any).Signature;
-  if (Sig?.from) {
-    const s = Sig.from(sig);
-    return { v: s.v, r: s.r, s: s.s };
-  }
-  // ethers v5 fallback
-  const split = (ethers as any).utils?.splitSignature;
-  if (split) return split(sig);
-  throw new Error("Signature parsing not supported (ethers v5/v6 uyumsuz?).");
+  const parsed = Signature.from(sig);
+  return { v: parsed.v, r: parsed.r, s: parsed.s };
 }
 
 async function buildPermitSignature(params: {
-  token: any;
-  owner: any;
+  token: GRUSHTokenLike;
+  owner: TypedDataSignerLike;
   spender: string;
   value: bigint;
   deadline: bigint;
 }) {
   const { token, owner, spender, value, deadline } = params;
 
-  const name: string = await token.name();
+  const name = await token.name();
   const version = "1";
   const chainId = await getChainId();
   const verifyingContract = await token.getAddress();
 
   const nonce = await token.nonces(owner.address);
 
-  const domain = {
+  const domain: TypedDataDomain = {
     name,
     version,
     chainId,
     verifyingContract,
   };
 
-  const types = {
+  const types: TypedDataTypes = {
     Permit: [
       { name: "owner", type: "address" },
       { name: "spender", type: "address" },
@@ -54,7 +102,7 @@ async function buildPermitSignature(params: {
     ],
   };
 
-  const message = {
+  const message: Record<string, unknown> = {
     owner: owner.address,
     spender,
     value,
@@ -62,14 +110,13 @@ async function buildPermitSignature(params: {
     deadline,
   };
 
-  // ethers v6 Signer: signTypedData; v5: _signTypedData
   let sig: string;
   if (typeof owner.signTypedData === "function") {
     sig = await owner.signTypedData(domain, types, message);
   } else if (typeof owner._signTypedData === "function") {
     sig = await owner._signTypedData(domain, types, message);
   } else {
-    throw new Error("Signer typed-data signing fonksiyonu yok (ethers v5/v6 uyumsuz?).");
+    throw new Error("Signer typed-data signing fonksiyonu yok.");
   }
 
   return { sig, ...sigToVRS(sig) };
@@ -80,15 +127,25 @@ describe("GRUSHToken", function () {
     const [admin, minter, burner, pauser, user, other] = await ethers.getSigners();
 
     const GRUSHToken = await ethers.getContractFactory("GRUSHToken");
-    const token = await GRUSHToken.deploy(
+    const deployed = await GRUSHToken.deploy(
       admin.address,
       minter.address,
       burner.address,
       pauser.address
     );
+
+    const token = deployed as unknown as GRUSHTokenLike;
     await token.waitForDeployment();
 
-    return { token, admin, minter, burner, pauser, user, other };
+    return {
+      token,
+      admin,
+      minter: minter as TypedDataSignerLike,
+      burner: burner as TypedDataSignerLike,
+      pauser: pauser as TypedDataSignerLike,
+      user: user as TypedDataSignerLike,
+      other: other as TypedDataSignerLike,
+    };
   }
 
   it("sets roles correctly on deploy", async function () {
@@ -133,7 +190,6 @@ describe("GRUSHToken", function () {
 
     expect(await token.balanceOf(burner.address)).to.equal(mintAmount - burnAmount);
 
-    // user is not burner
     await token.connect(minter).mint(user.address, mintAmount);
     await expect(token.connect(user).burn(1n)).to.revert(ethers);
   });
@@ -174,9 +230,8 @@ describe("GRUSHToken", function () {
       deadline,
     });
 
-    // permit(owner, spender, value, deadline, v, r, s)
     await token
-      .connect(burner) // anyone can submit permit; spender is fine
+      .connect(burner)
       .permit(user.address, burner.address, value, deadline, v, r, s);
 
     expect(await token.allowance(user.address, burner.address)).to.equal(value);
@@ -195,24 +250,16 @@ describe("GRUSHToken", function () {
     await token.connect(minter).mint(user.address, amt);
     await token.connect(minter).mint(burner.address, amt);
 
-    // pause
     await token.connect(pauser).pause();
     expect(await token.paused()).to.equal(true);
 
-    // transfers blocked
     await expect(token.connect(user).transfer(other.address, 1n)).to.revert(ethers);
-
-    // mint blocked (reverts due to _update whenNotPaused)
     await expect(token.connect(minter).mint(user.address, 1n)).to.revert(ethers);
-
-    // burn blocked (reverts due to _update whenNotPaused)
     await expect(token.connect(burner).burn(1n)).to.revert(ethers);
 
-    // unpause
     await token.connect(pauser).unpause();
     expect(await token.paused()).to.equal(false);
 
-    // now transfer works
     await token.connect(user).transfer(other.address, 1n);
     expect(await token.balanceOf(other.address)).to.equal(1n);
   });

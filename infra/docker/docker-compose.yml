@@ -1,1 +1,42 @@
-# TODO: fill config
+name: grush
+
+services:
+  api:
+    image: grush/api:local
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    env_file:
+      - path: ./.env
+        required: false
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  worker:
+    image: grush/worker:local
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.worker
+    env_file:
+      - path: ./.env
+        required: false
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    profiles: ["dev"]
+    environment:
+      POSTGRES_DB: grush
+      POSTGRES_USER: grush
+      POSTGRES_PASSWORD: grush
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

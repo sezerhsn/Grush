@@ -1,8 +1,38 @@
-FROM node:20-alpine
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev || npm i
-COPY . .
+# syntax=docker/dockerfile:1.7
+
+ARG NODE_IMAGE=node:22.10.0-bullseye-slim
+
+FROM ${NODE_IMAGE} AS base
 ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+WORKDIR /app
+
+FROM base AS deps
+WORKDIR /app/services/worker
+COPY services/worker/package.json ./
+COPY services/worker/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+FROM base AS builder
+WORKDIR /app/services/worker
+COPY --from=deps /app/services/worker/node_modules ./node_modules
+COPY services/worker ./
+RUN npm run build
+
+FROM base AS prod-deps
+WORKDIR /app/services/worker
+COPY services/worker/package.json ./
+COPY services/worker/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+
+FROM base AS runner
+WORKDIR /app/services/worker
+COPY --from=builder --chown=node:node /app/services/worker/.next ./.next
+COPY --from=builder --chown=node:node /app/services/worker/package.json ./package.json
+COPY --from=prod-deps --chown=node:node /app/services/worker/node_modules ./node_modules
+
+USER node
+EXPOSE 3000
 CMD ["npm","run","start"]
-# Dockerfile.worker

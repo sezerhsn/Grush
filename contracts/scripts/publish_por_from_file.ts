@@ -1,38 +1,111 @@
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import hre from "hardhat";
+import type {
+  ContractRunner,
+  ContractTransactionResponse,
+  TypedDataDomain,
+  TypedDataField,
+} from "ethers";
+import {
+  assertBytes32Hex,
+  reportIdToBytes32,
+  toUintBigInt,
+  type JsonUint,
+} from "../../por/merkle/hash_utils.ts";
 
 const { ethers } = await hre.network.connect();
 
-type PorOutput = {
-  schema_version: string;
-  report_id: string;
-  as_of_timestamp: number;
-  bars_count: number;
-  attested_fine_gold_grams: number;
-  bar_list_hash: string; // 0x bytes32
-  merkle_root: string; // 0x bytes32
+type ParsedArgs = Record<string, string | boolean>;
+type TypedDataTypes = Record<string, TypedDataField[]>;
+
+type AddressSigner = ContractRunner & {
+  address: string;
+  signTypedData: (
+    domain: TypedDataDomain,
+    types: TypedDataTypes,
+    value: Record<string, unknown>
+  ) => Promise<string>;
 };
 
-function parseArgs(argv: string[]) {
-  const args: Record<string, string | boolean> = {};
+type ReserveAttestationRecord = {
+  asOfTimestamp: bigint;
+  publishedAt: bigint;
+  attestedFineGoldGrams: bigint;
+  merkleRoot: string;
+  barListHash: string;
+  signer: string;
+};
+
+type ReserveRegistryLike = {
+  getAddress(): Promise<string>;
+  waitForDeployment(): Promise<ReserveRegistryLike>;
+  connect(runner: ContractRunner | null): ReserveRegistryLike;
+
+  setAllowedSigner(
+    signer: string,
+    allowed: boolean
+  ): Promise<ContractTransactionResponse>;
+
+  publishAttestation(
+    reportId: string,
+    asOfTimestamp: bigint,
+    attestedFineGoldGrams: bigint,
+    merkleRoot: string,
+    barListHash: string,
+    signature: string
+  ): Promise<ContractTransactionResponse>;
+
+  latestReportId(): Promise<string>;
+  latestAttestation(): Promise<[string, ReserveAttestationRecord]>;
+  getReportIds(start: bigint | number, count: bigint | number): Promise<string[]>;
+};
+
+type PorOutput = {
+  schema_version: "0.1";
+  report_id: string;
+  as_of_timestamp: JsonUint;
+  bars_count: JsonUint;
+  attested_fine_gold_grams: JsonUint;
+  bar_list_hash: string;
+  merkle_root: string;
+};
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const args: ParsedArgs = {};
+
   for (let i = 2; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--help" || a === "-h") args.help = true;
-    else if (a.startsWith("--")) {
-      const key = a.slice(2);
-      const val = argv[i + 1];
-      if (!val || val.startsWith("--")) args[key] = true;
-      else {
-        args[key] = val;
-        i++;
-      }
+    const current = argv[i];
+    if (!current) {
+      continue;
     }
+
+    if (current === "--help" || current === "-h") {
+      args.help = true;
+      continue;
+    }
+
+    if (!current.startsWith("--")) {
+      continue;
+    }
+
+    const key = current.slice(2);
+    const next = argv[i + 1];
+
+    if (!next || next.startsWith("--")) {
+      args[key] = true;
+      continue;
+    }
+
+    args[key] = next;
+    i++;
   }
+
   return args;
 }
 
 function usageAndExit(code = 1): never {
+  // eslint-disable-next-line no-console
   console.error(`
 Usage:
   npx hardhat run contracts/scripts/publish_por_from_file.ts --in <por_output.json>
@@ -47,78 +120,123 @@ Outputs:
   process.exit(code);
 }
 
-function assertBytes32Hex(x: string, name: string) {
-  if (typeof x !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(x)) {
-    throw new Error(`${name} bytes32 hex değil: ${x}`);
-  }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readJson<T>(p: string): T {
-  const abs = path.isAbsolute(p) ? p : path.join(process.cwd(), p);
-  const raw = fs.readFileSync(abs, "utf8");
+function readJson<T>(filePath: string): T {
+  const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
+  const raw = fs.readFileSync(absolutePath, "utf8");
   return JSON.parse(raw) as T;
 }
 
-function writeJson(p: string, obj: any) {
-  const abs = path.isAbsolute(p) ? p : path.join(process.cwd(), p);
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
+function writeJson(filePath: string, obj: unknown): string {
+  const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
+  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
 
   const json = JSON.stringify(
     obj,
-    (_k, v) => (typeof v === "bigint" ? v.toString() : v),
+    (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value),
     2
   );
 
-  fs.writeFileSync(abs, json + "\n", "utf8");
-  return abs;
+  fs.writeFileSync(absolutePath, `${json}\n`, "utf8");
+  return absolutePath;
 }
 
-async function main() {
-  const args = parseArgs(process.argv);
-  if (args.help) usageAndExit(0);
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${name} non-empty string olmalı.`);
+  }
+  return value.trim();
+}
 
-  const inPath = (args.in as string) || "por/reports/por_output_demo.json";
-  const por = readJson<PorOutput>(inPath);
+function toUint64BigInt(value: JsonUint, name: string): bigint {
+  const asBigInt = toUintBigInt(value, name);
+  const UINT64_MAX = (1n << 64n) - 1n;
 
-  if (por.schema_version !== "0.1") {
-    throw new Error(`schema_version beklenen 0.1, aldım: ${por.schema_version}`);
+  if (asBigInt > UINT64_MAX) {
+    throw new Error(`${name} uint64 sınırını aşıyor. Aldım: ${asBigInt.toString()}`);
   }
 
-  assertBytes32Hex(por.bar_list_hash, "bar_list_hash");
-  assertBytes32Hex(por.merkle_root, "merkle_root");
+  return asBigInt;
+}
 
-  const [admin, publisher, pauser, allowedSigner] = await ethers.getSigners();
+function validatePorOutput(input: unknown): PorOutput {
+  if (!isRecord(input)) {
+    throw new Error("PoR output JSON object değil.");
+  }
 
-  // 1) Deploy ReserveRegistry (local ephemeral network)
-  const registry = await ethers.deployContract("ReserveRegistry", [
+  if (input.schema_version !== "0.1") {
+    throw new Error(`schema_version beklenen 0.1, aldım: ${String(input.schema_version)}`);
+  }
+
+  const report_id = requireString(input.report_id, "report_id");
+  const as_of_timestamp = input.as_of_timestamp as JsonUint;
+  const bars_count = input.bars_count as JsonUint;
+  const attested_fine_gold_grams = input.attested_fine_gold_grams as JsonUint;
+  const bar_list_hash = requireString(input.bar_list_hash, "bar_list_hash");
+  const merkle_root = requireString(input.merkle_root, "merkle_root");
+
+  toUint64BigInt(as_of_timestamp, "as_of_timestamp");
+  toUintBigInt(bars_count, "bars_count");
+  toUintBigInt(attested_fine_gold_grams, "attested_fine_gold_grams");
+  assertBytes32Hex(bar_list_hash, "bar_list_hash");
+  assertBytes32Hex(merkle_root, "merkle_root");
+
+  return {
+    schema_version: "0.1",
+    report_id,
+    as_of_timestamp,
+    bars_count,
+    attested_fine_gold_grams,
+    bar_list_hash,
+    merkle_root,
+  };
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv);
+  if (args.help) {
+    usageAndExit(0);
+  }
+
+  const inPath = typeof args.in === "string" ? args.in : "por/reports/por_output_demo.json";
+  const por = validatePorOutput(readJson<unknown>(inPath));
+
+  const [admin, publisher, pauser, allowedSigner] =
+    (await ethers.getSigners()) as AddressSigner[];
+
+  const deployed = await ethers.deployContract("ReserveRegistry", [
     admin.address,
     publisher.address,
     pauser.address,
   ]);
+
+  const registry = deployed as unknown as ReserveRegistryLike;
   await registry.waitForDeployment();
 
-  // 2) Allow signer
-  await (await registry.connect(admin).setAllowedSigner(allowedSigner.address, true)).wait();
+  await registry.connect(admin).setAllowedSigner(allowedSigner.address, true);
 
-  // 3) reportId mapping (string -> bytes32)
-  // v0.1: reportId = keccak256(utf8(report_id))
-  const reportId = ethers.keccak256(ethers.toUtf8Bytes(por.report_id));
-
-  const asOfTimestamp = por.as_of_timestamp; // uint64
-  const attestedFineGoldGrams = BigInt(por.attested_fine_gold_grams);
+  const reportId = reportIdToBytes32(por.report_id);
+  const asOfTimestamp = toUint64BigInt(por.as_of_timestamp, "as_of_timestamp");
+  const attestedFineGoldGrams = toUintBigInt(
+    por.attested_fine_gold_grams,
+    "attested_fine_gold_grams"
+  );
   const merkleRoot = por.merkle_root;
   const barListHash = por.bar_list_hash;
 
-  // 4) EIP-712 signature
-  const chainId = (await ethers.provider.getNetwork()).chainId;
-  const domain = {
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+
+  const domain: TypedDataDomain = {
     name: "GRUSH Reserve Attestation",
     version: "1",
     chainId,
     verifyingContract: await registry.getAddress(),
   };
 
-  const types = {
+  const types: TypedDataTypes = {
     ReserveAttestation: [
       { name: "reportId", type: "bytes32" },
       { name: "asOfTimestamp", type: "uint64" },
@@ -128,7 +246,7 @@ async function main() {
     ],
   };
 
-  const value = {
+  const value: Record<string, unknown> = {
     reportId,
     asOfTimestamp,
     attestedFineGoldGrams,
@@ -138,24 +256,29 @@ async function main() {
 
   const signature = await allowedSigner.signTypedData(domain, types, value);
 
-  // 5) Publish on-chain
   const tx = await registry
     .connect(publisher)
-    .publishAttestation(reportId, asOfTimestamp, attestedFineGoldGrams, merkleRoot, barListHash, signature);
-  const rc = await tx.wait();
+    .publishAttestation(
+      reportId,
+      asOfTimestamp,
+      attestedFineGoldGrams,
+      merkleRoot,
+      barListHash,
+      signature
+    );
 
-  // 6) Quick verification
+  const receipt = await tx.wait();
+
   const latest = await registry.latestReportId();
-  const latestTuple = await registry.latestAttestation(); // (reportId, rec)
+  const latestTuple = await registry.latestAttestation();
   const ids = await registry.getReportIds(999, 10);
 
-  // 7) Write artifacts
   const signedOut = writeJson("por/reports/attestation_demo_signed.json", {
     schema_version: "0.1",
     report_id: por.report_id,
     reportId,
     as_of_timestamp: asOfTimestamp,
-    attested_fine_gold_grams: por.attested_fine_gold_grams,
+    attested_fine_gold_grams: attestedFineGoldGrams,
     merkle_root: merkleRoot,
     bar_list_hash: barListHash,
     signer: allowedSigner.address,
@@ -165,8 +288,8 @@ async function main() {
 
   const receiptOut = writeJson("por/reports/publish_receipt_demo.json", {
     registry: await registry.getAddress(),
-    txHash: rc?.hash ?? tx.hash,
-    blockNumber: rc?.blockNumber ?? null,
+    txHash: receipt?.hash ?? tx.hash,
+    blockNumber: receipt?.blockNumber ?? null,
     reportId,
     latestReportId: latest,
     latestAttestation: {
@@ -176,16 +299,24 @@ async function main() {
     getReportIds_999_10_length: ids.length,
   });
 
+  // eslint-disable-next-line no-console
   console.log("OK");
+  // eslint-disable-next-line no-console
   console.log("ReserveRegistry:", await registry.getAddress());
+  // eslint-disable-next-line no-console
   console.log("reportId:", reportId);
+  // eslint-disable-next-line no-console
   console.log("latestReportId:", latest);
+  // eslint-disable-next-line no-console
   console.log("getReportIds(999,10).length:", ids.length);
+  // eslint-disable-next-line no-console
   console.log("WROTE:", signedOut);
+  // eslint-disable-next-line no-console
   console.log("WROTE:", receiptOut);
 }
 
-main().catch((e) => {
-  console.error(e);
+main().catch((error: unknown) => {
+  // eslint-disable-next-line no-console
+  console.error(error);
   process.exit(1);
 });

@@ -1,30 +1,28 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import fs from "fs";
 import path from "path";
-import { leafHash, nodeHash, assertBytes32Hex } from "./hash_utils.ts";
+import { assertBytes32Hex, leafHash, nodeHash } from "./hash_utils.ts";
 import type { LeafInput } from "./hash_utils.ts";
 
-type ProofFile = {
-  // REQUIRED:
-  siblings: string[]; // bytes32[]
-  // OPTIONAL but strongly recommended:
-  // - positions[i] says where the sibling sits relative to the running hash at step i.
-  //   "left"  => parent = H(sibling, hash)
-  //   "right" => parent = H(hash, sibling)
-  positions?: Array<"left" | "right"> | boolean[];
+type Position = "left" | "right";
+type ParsedArgs = Record<string, string | boolean>;
+type JsonRecord = Record<string, unknown>;
+
+type NormalizedProofFile = {
+  siblings: string[];
+  positions: Position[];
 };
 
 function usageAndExit(code = 1): never {
   // eslint-disable-next-line no-console
   console.error(`
 Usage:
-  ts-node por/merkle/verify_proof.ts --leaf <leaf.json> --proof <proof.json> --root <0xBytes32>
+  tsx por/merkle/verify_proof.ts --leaf <leaf.json> --proof <proof.json> --root <0xBytes32>
 
 leaf.json:
   Must contain at least:
-    as_of_timestamp (int)
-    fineness (string)
-    fine_weight_g (int)
+    as_of_timestamp (safe JSON integer or decimal uint string)
+    fineness (decimal string, örn. "999.9")
+    fine_weight_g (safe JSON integer or decimal uint string)
     refiner (string)
     serial_no (string)
     vault_id (string)
@@ -42,141 +40,199 @@ Alternative positions format:
 
 Exit codes:
   0 = proof valid
-  1 = invalid
+  1 = invalid or input error
 `);
   process.exit(code);
 }
 
-function parseArgs(argv: string[]) {
-  const args: Record<string, string | boolean> = {};
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const args: ParsedArgs = {};
+
   for (let i = 2; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--help" || a === "-h") args.help = true;
-    else if (a.startsWith("--")) {
-      const key = a.slice(2);
-      const val = argv[i + 1];
-      if (!val || val.startsWith("--")) args[key] = true;
-      else {
-        args[key] = val;
-        i++;
-      }
+    const current = argv[i];
+
+    if (current === "--help" || current === "-h") {
+      args.help = true;
+      continue;
     }
+
+    if (!current.startsWith("--")) {
+      continue;
+    }
+
+    const key = current.slice(2);
+    const next = argv[i + 1];
+
+    if (!next || next.startsWith("--")) {
+      args[key] = true;
+      continue;
+    }
+
+    args[key] = next;
+    i++;
   }
+
   return args;
 }
 
-function assertInteger(n: any, name: string) {
-  if (typeof n !== "number" || !Number.isInteger(n)) {
-    throw new Error(`${name} integer olmalı. Aldım: ${n}`);
-  }
+function readJsonFile(filePath: string): unknown {
+  const absolutePath = path.resolve(filePath);
+  const raw = fs.readFileSync(absolutePath, "utf8");
+  return JSON.parse(raw) as unknown;
 }
 
-function readJson(p: string): any {
-  const abs = path.resolve(p);
-  const raw = fs.readFileSync(abs, "utf8");
-  return JSON.parse(raw);
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${name} string olmalı. Aldım: ${String(value)}`);
+  }
+  return value;
 }
 
-function normalizePositions(pos: any, n: number): Array<"left" | "right"> {
-  if (pos == null) {
-    throw new Error("proof.positions gerekli (left/right).");
+function requireJsonUint(value: unknown, name: string): LeafInput["as_of_timestamp"] {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value)) {
+      throw new Error(`${name} integer olmalı. Aldım: ${String(value)}`);
+    }
+    return value;
   }
-  if (!Array.isArray(pos)) throw new Error("proof.positions array olmalı.");
 
-  if (pos.length !== n) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  throw new Error(
+    `${name} integer number veya decimal uint string olmalı. Aldım: ${String(value)}`
+  );
+}
+
+function normalizePositions(value: unknown, expectedLength: number): Position[] {
+  if (!Array.isArray(value)) {
+    throw new Error("proof.positions array olmalı.");
+  }
+
+  if (value.length !== expectedLength) {
     throw new Error(
-      `positions uzunluğu (${pos.length}) siblings uzunluğuna (${n}) eşit olmalı.`
+      `positions uzunluğu (${value.length}) siblings uzunluğuna (${expectedLength}) eşit olmalı.`
     );
   }
 
-  // boolean[] format: true=left, false=right
-  if (typeof pos[0] === "boolean") {
-    return (pos as boolean[]).map((b) => (b ? "left" : "right"));
+  if (value.length === 0) {
+    return [];
   }
 
-  return (pos as any[]).map((x) => {
-    if (x !== "left" && x !== "right") {
-      throw new Error(`positions elemanı left/right olmalı. Aldım: ${x}`);
+  const allBooleans = value.every((item) => typeof item === "boolean");
+  if (allBooleans) {
+    return value.map((item) => ((item as boolean) ? "left" : "right"));
+  }
+
+  return value.map((item, index) => {
+    if (item !== "left" && item !== "right") {
+      throw new Error(`positions[${index}] left/right olmalı. Aldım: ${String(item)}`);
     }
-    return x;
+    return item;
   });
 }
 
-function loadLeafInput(leafObj: any): LeafInput {
-  assertInteger(leafObj.as_of_timestamp, "as_of_timestamp");
-  assertInteger(leafObj.fine_weight_g, "fine_weight_g");
-
-  const fineness = String(leafObj.fineness);
-  const refiner = String(leafObj.refiner);
-  const serial_no = String(leafObj.serial_no);
-  const vault_id = String(leafObj.vault_id);
+function loadLeafInput(value: unknown): LeafInput {
+  if (!isJsonRecord(value)) {
+    throw new Error("leaf.json object değil.");
+  }
 
   return {
-    as_of_timestamp: leafObj.as_of_timestamp,
-    fineness,
-    fine_weight_g: leafObj.fine_weight_g,
-    refiner,
-    serial_no,
-    vault_id,
+    as_of_timestamp: requireJsonUint(value.as_of_timestamp, "as_of_timestamp"),
+    fineness: requireString(value.fineness, "fineness"),
+    fine_weight_g: requireJsonUint(value.fine_weight_g, "fine_weight_g"),
+    refiner: requireString(value.refiner, "refiner"),
+    serial_no: requireString(value.serial_no, "serial_no"),
+    vault_id: requireString(value.vault_id, "vault_id"),
   };
 }
 
-function verifyProof(leafHashHex: string, proof: ProofFile, root: string): boolean {
-  assertBytes32Hex(root, "root");
-
-  let h = leafHashHex;
-  assertBytes32Hex(h, "leaf_hash");
-
-  const siblings = proof.siblings ?? [];
-  if (!Array.isArray(siblings) || siblings.length === 0) {
-    // no siblings: tree must have been single leaf
-    return h.toLowerCase() === root.toLowerCase();
+function loadProofFile(value: unknown): NormalizedProofFile {
+  if (!isJsonRecord(value)) {
+    throw new Error("proof.json object değil.");
   }
 
-  const positions = normalizePositions(proof.positions, siblings.length);
-
-  for (let i = 0; i < siblings.length; i++) {
-    const s = siblings[i];
-    assertBytes32Hex(s, `siblings[${i}]`);
-    const pos = positions[i];
-
-    if (pos === "left") {
-      h = nodeHash(s, h);
-    } else {
-      h = nodeHash(h, s);
-    }
+  const siblingsRaw = value.siblings;
+  if (!Array.isArray(siblingsRaw)) {
+    throw new Error("proof.siblings array değil.");
   }
 
-  return h.toLowerCase() === root.toLowerCase();
+  const siblings = siblingsRaw.map((item, index) => {
+    const sibling = requireString(item, `proof.siblings[${index}]`);
+    assertBytes32Hex(sibling, `proof.siblings[${index}]`);
+    return sibling;
+  });
+
+  if (siblings.length === 0) {
+    const positions = value.positions === undefined ? [] : normalizePositions(value.positions, 0);
+    return { siblings, positions };
+  }
+
+  if (value.positions === undefined) {
+    throw new Error("proof.positions gerekli (left/right).");
+  }
+
+  return {
+    siblings,
+    positions: normalizePositions(value.positions, siblings.length),
+  };
 }
 
-function main() {
+function hexEquals(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function verifyProof(leafHashHex: string, proof: NormalizedProofFile, root: string): boolean {
+  assertBytes32Hex(root, "root");
+  assertBytes32Hex(leafHashHex, "leaf_hash");
+
+  let currentHash = leafHashHex;
+
+  for (let i = 0; i < proof.siblings.length; i++) {
+    const sibling = proof.siblings[i];
+    const position = proof.positions[i];
+
+    currentHash =
+      position === "left" ? nodeHash(sibling, currentHash) : nodeHash(currentHash, sibling);
+  }
+
+  return hexEquals(currentHash, root);
+}
+
+function main(): number {
   const args = parseArgs(process.argv);
-  if (args.help) usageAndExit(0);
+  if (args.help) {
+    usageAndExit(0);
+  }
 
-  const leafPath = args.leaf as string | undefined;
-  const proofPath = args.proof as string | undefined;
-  const root = args.root as string | undefined;
+  const leafPath = typeof args.leaf === "string" ? args.leaf : undefined;
+  const proofPath = typeof args.proof === "string" ? args.proof : undefined;
+  const root = typeof args.root === "string" ? args.root : undefined;
 
-  if (!leafPath || !proofPath || !root) usageAndExit(1);
+  if (!leafPath || !proofPath || !root) {
+    usageAndExit(1);
+  }
 
-  const leafObj = readJson(leafPath);
-  const proofObj = readJson(proofPath) as ProofFile;
-
-  if (!proofObj || typeof proofObj !== "object") throw new Error("proof.json object değil.");
-  if (!Array.isArray(proofObj.siblings)) throw new Error("proof.siblings array değil.");
-
-  const leafInput = loadLeafInput(leafObj);
-
-  // FIX: leafHash LeafInput ister (string değil)
-  const lh = leafHash(leafInput);
-
-  const ok = verifyProof(lh, proofObj, root);
+  const leafInput = loadLeafInput(readJsonFile(leafPath));
+  const proof = loadProofFile(readJsonFile(proofPath));
+  const ok = verifyProof(leafHash(leafInput), proof, root);
 
   // eslint-disable-next-line no-console
   console.log(ok ? "OK: proof valid" : "FAIL: proof invalid");
 
-  process.exit(ok ? 0 : 1);
+  return ok ? 0 : 1;
 }
 
-main();
+try {
+  process.exit(main());
+} catch (error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  // eslint-disable-next-line no-console
+  console.error(`ERROR: ${message}`);
+  process.exit(1);
+}

@@ -29,12 +29,22 @@
     "as_of_timestamp": {
       "type": "integer",
       "minimum": 0,
-      "description": "Unix epoch seconds for which this attestation is valid."
+      "description": "Unix epoch seconds for which this attestation is valid.",
+      "maximum": 9007199254740991
     },
     "attested_fine_gold_grams": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Total fine gold grams attested by signer."
+      "description": "Total fine gold grams attested by signer. MUST be provided as a base-10 unsigned integer string to avoid JSON/JS numeric precision loss. For backwards compatibility, a JSON integer is accepted only up to Number.MAX_SAFE_INTEGER.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      ]
     },
     "merkle_root": {
       "type": "string",
@@ -53,7 +63,8 @@
     "chain_id": {
       "type": "integer",
       "minimum": 1,
-      "description": "Ethereum chain id (mainnet: 1)."
+      "description": "Ethereum chain id (mainnet: 1).",
+      "maximum": 9007199254740991
     },
     "reserve_registry_address": {
       "type": "string",
@@ -73,11 +84,26 @@
     "eip712_domain": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version", "chainId", "verifyingContract"],
+      "required": [
+        "name",
+        "version",
+        "chainId",
+        "verifyingContract"
+      ],
       "properties": {
-        "name": { "type": "string", "const": "GRUSH Reserve Attestation" },
-        "version": { "type": "string", "const": "1" },
-        "chainId": { "type": "integer", "minimum": 1 },
+        "name": {
+          "type": "string",
+          "const": "GRUSH Reserve Attestation"
+        },
+        "version": {
+          "type": "string",
+          "const": "1"
+        },
+        "chainId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
         "verifyingContract": {
           "type": "string",
           "pattern": "^0x[a-fA-F0-9]{40}$"

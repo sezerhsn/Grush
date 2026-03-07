@@ -1,6 +1,4 @@
-import os
-import re
-import json
+import :contentReference[oaicite:2]{index=2}son
 import subprocess
 from pathlib import Path
 
@@ -119,7 +117,7 @@ export {};
 """
 
 def dockerfile_skeleton(service: str) -> str:
-    return f"""FROM node:20-alpine
+    return f"""FROM node:22.10.0-alpine
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev || npm i

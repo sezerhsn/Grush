@@ -1,40 +1,84 @@
 import { expect } from "chai";
 import hre from "hardhat";
+import type {
+  ContractRunner,
+  ContractTransactionResponse,
+  TypedDataDomain,
+  TypedDataField,
+} from "ethers";
+
+const { ethers } = await hre.network.connect();
+
+type TypedDataTypes = Record<string, TypedDataField[]>;
+
+type AddressSigner = ContractRunner & {
+  address: string;
+  signTypedData: (
+    domain: TypedDataDomain,
+    types: TypedDataTypes,
+    value: Record<string, unknown>
+  ) => Promise<string>;
+};
+
+type ReserveRegistryLike = {
+  getAddress(): Promise<string>;
+  waitForDeployment(): Promise<ReserveRegistryLike>;
+  connect(runner: ContractRunner | null): ReserveRegistryLike;
+
+  setAllowedSigner(
+    signer: string,
+    allowed: boolean
+  ): Promise<ContractTransactionResponse>;
+
+  publishAttestation(
+    reportId: string,
+    asOfTimestamp: bigint,
+    attestedFineGoldGrams: bigint,
+    merkleRoot: string,
+    barListHash: string,
+    signature: string
+  ): Promise<ContractTransactionResponse>;
+
+  exists(reportId: string): Promise<boolean>;
+  latestReportId(): Promise<string>;
+  getReportIds(start: bigint | number, count: bigint | number): Promise<string[]>;
+};
 
 describe("ReserveRegistry", function () {
   it("publishes an attestation and returns empty array when start >= n", async function () {
-    // Hardhat 3: ethers'ı buradan alıyoruz (hardhat'tan named export yok)
-    const { ethers } = await hre.network.connect();
+    const [admin, publisher, pauser, allowedSigner] =
+      (await ethers.getSigners()) as AddressSigner[];
 
-    const [admin, publisher, pauser, allowedSigner] = await ethers.getSigners();
-
-    const registry = await ethers.deployContract("ReserveRegistry", [
+    const deployed = await ethers.deployContract("ReserveRegistry", [
       admin.address,
       publisher.address,
       pauser.address,
     ]);
+
+    const registry = deployed as unknown as ReserveRegistryLike;
     await registry.waitForDeployment();
 
-    // allow the signer
-    await (await registry.connect(admin).setAllowedSigner(allowedSigner.address, true)).wait();
+    await registry.connect(admin).setAllowedSigner(allowedSigner.address, true);
 
     const reportId = ethers.keccak256(ethers.toUtf8Bytes("report-1"));
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes("root-1"));
     const barListHash = ethers.keccak256(ethers.toUtf8Bytes("barlist-1"));
 
-    const asOfTimestamp = Math.floor(Date.now() / 1000);
+    const latestBlock = await ethers.provider.getBlock("latest");
+    const asOfTimestamp = BigInt(latestBlock?.timestamp ?? 0);
     const attestedFineGoldGrams = 123456789n;
 
-    const chainId = (await ethers.provider.getNetwork()).chainId;
+    const network = await ethers.provider.getNetwork();
+    const chainId = Number(network.chainId);
 
-    const domain = {
+    const domain: TypedDataDomain = {
       name: "GRUSH Reserve Attestation",
       version: "1",
       chainId,
       verifyingContract: await registry.getAddress(),
     };
 
-    const types = {
+    const types: TypedDataTypes = {
       ReserveAttestation: [
         { name: "reportId", type: "bytes32" },
         { name: "asOfTimestamp", type: "uint64" },
@@ -44,7 +88,7 @@ describe("ReserveRegistry", function () {
       ],
     };
 
-    const value = {
+    const value: Record<string, unknown> = {
       reportId,
       asOfTimestamp,
       attestedFineGoldGrams,
@@ -54,18 +98,21 @@ describe("ReserveRegistry", function () {
 
     const signature = await allowedSigner.signTypedData(domain, types, value);
 
-    // publish from publisher (has role via constructor)
-    await (
-      await registry
-        .connect(publisher)
-        .publishAttestation(reportId, asOfTimestamp, attestedFineGoldGrams, merkleRoot, barListHash, signature)
-    ).wait();
+    await registry
+      .connect(publisher)
+      .publishAttestation(
+        reportId,
+        asOfTimestamp,
+        attestedFineGoldGrams,
+        merkleRoot,
+        barListHash,
+        signature
+      );
 
-    expect(await registry.exists(reportId)).to.eq(true);
-    expect(await registry.latestReportId()).to.eq(reportId);
+    expect(await registry.exists(reportId)).to.equal(true);
+    expect(await registry.latestReportId()).to.equal(reportId);
 
-    // Bugfix assert: start >= n => empty array
     const ids = await registry.getReportIds(999, 10);
-    expect(ids.length).to.eq(0);
+    expect(ids.length).to.equal(0);
   });
 });

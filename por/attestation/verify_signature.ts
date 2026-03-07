@@ -1,35 +1,52 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import fs from "fs";
-import path from "path";
-import * as ethers from "ethers";
+import fs from "node:fs";
+import path from "node:path";
 import {
+  Contract,
+  JsonRpcProvider,
+  getAddress,
+  isAddress,
+  verifyTypedData,
+  type TypedDataDomain,
+  type TypedDataField,
+} from "ethers";
+import {
+  assertBytes32Hex,
   normalizeAddress,
   reportIdToBytes32,
-  assertBytes32Hex,
-} from "../merkle/hash_utils";
+  toUintBigInt,
+} from "../merkle/hash_utils.ts";
 
 const REGISTRY_ABI = [
   "function exists(bytes32 reportId) external view returns (bool)",
   "function getAttestation(bytes32 reportId) external view returns (tuple(uint64 asOfTimestamp,uint64 publishedAt,uint256 attestedFineGoldGrams,bytes32 merkleRoot,bytes32 barListHash,address signer))",
-];
+] as const;
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const UINT64_MAX = (1n << 64n) - 1n;
+const DECIMAL_UINT_REGEX = /^(0|[1-9][0-9]*)$/;
+
+type ParsedArgs = Record<string, string | boolean>;
+type JsonRecord = Record<string, unknown>;
+type TypedDataTypes = Record<string, TypedDataField[]>;
 
 type PublishReceipt = {
   registry?: string;
-  chainId?: number;
+  chainId?: string;
   reportId?: string;
   report_id?: string;
+  publishedReportId?: string;
   txHash?: string;
-  blockNumber?: number;
-  status?: number;
+  blockNumber?: string;
+  status?: string;
 };
 
 type Attestation = {
   schema_version: "0.1";
   report_id: string;
-  as_of_timestamp: number;
-  attested_fine_gold_grams: number;
-  merkle_root: string; // bytes32
-  bar_list_hash: string; // bytes32
+  as_of_timestamp: string;
+  attested_fine_gold_grams: string;
+  merkle_root: string;
+  bar_list_hash: string;
   chain_id: number;
   reserve_registry_address: string;
   signer_address: string;
@@ -41,13 +58,29 @@ type Attestation = {
     verifyingContract: string;
   };
   eip712_types_version: "0.1";
-  signature: string; // 65 bytes hex
+  signature: string;
+};
+
+type OnchainAttestationRecord = {
+  asOfTimestamp: string;
+  publishedAt: string;
+  attestedFineGoldGrams: string;
+  merkleRoot: string;
+  barListHash: string;
+  signer: string;
+};
+
+type RegistryContractLike = Contract & {
+  exists: (reportId: string) => Promise<boolean>;
+  getAttestation: (reportId: string) => Promise<unknown>;
 };
 
 function usageAndExit(code = 1): never {
+  // eslint-disable-next-line no-console
   console.error(`
 Usage:
-  ts-node por/attestation/verify_signature.ts --in <attestation.json> [--expect <0xSigner>] [--receipt <publish_receipt.json>] [--rpc <RPC_URL>] [--quiet]
+  npx tsx por/attestation/verify_signature.ts --in <attestation.json> [--expect <0xSigner>] [--receipt <publish_receipt.json>] [--rpc <RPC_URL>] [--quiet]
+  npm run por:verify-signature -- --in <attestation.json> [--expect <0xSigner>] [--receipt <publish_receipt.json>] [--rpc <RPC_URL>] [--quiet]
 
 Validates:
 - schema_version == 0.1
@@ -55,169 +88,435 @@ Validates:
 - signature is 65-byte hex
 - EIP-712 domain matches reserve_registry_address + chain_id
 - recovered address matches signer_address (and optionally --expect)
-- OPTIONAL (if receipt exists or --receipt provided): on-chain record matches attestation (requires --rpc or RPC_URL)
+- OPTIONAL (if receipt exists or --receipt provided): receipt sanity + on-chain record matches attestation
+
+RPC resolution:
+- --rpc
+- SEPOLIA_RPC_URL / MAINNET_RPC_URL by attestation.chain_id
+- fallback RPC_URL
 
 Exit codes:
   0 = OK
   1 = FAIL
 `);
   process.exit(code);
+  throw new Error("unreachable");
 }
 
-function parseArgs(argv: string[]) {
-  const args: Record<string, string | boolean> = {};
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const args: ParsedArgs = {};
+
   for (let i = 2; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--help" || a === "-h") args.help = true;
-    else if (a.startsWith("--")) {
-      const key = a.slice(2);
-      const val = argv[i + 1];
-      if (!val || val.startsWith("--")) args[key] = true;
-      else {
-        args[key] = val;
-        i++;
-      }
+    const current = argv[i];
+    if (!current) continue;
+
+    if (current === "--help" || current === "-h") {
+      args.help = true;
+      continue;
     }
+
+    if (!current.startsWith("--")) continue;
+
+    const key = current.slice(2);
+    const next = argv[i + 1];
+
+    if (!next || next.startsWith("--")) {
+      args[key] = true;
+      continue;
+    }
+
+    args[key] = next;
+    i++;
   }
+
   return args;
 }
 
-function getProvider(rpcUrl: string) {
-  const v6 = (ethers as any).JsonRpcProvider;
-  if (typeof v6 === "function") return new v6(rpcUrl);
+function readJsonFile<T>(filePath: string): T {
+  const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
 
-  const v5 = (ethers as any).providers?.JsonRpcProvider;
-  if (typeof v5 === "function") return new v5(rpcUrl);
-
-  throw new Error("ethers JsonRpcProvider bulunamadı (ethers v5/v6 uyumsuz?).");
-}
-
-function readJson<T>(p: string): T {
-  const abs = path.isAbsolute(p) ? p : path.join(process.cwd(), p);
-  return JSON.parse(fs.readFileSync(abs, "utf8")) as T;
-}
-
-function tryFindReceiptPath(attAbsPath: string): string | null {
-  const candidates = [
-    path.join(path.dirname(attAbsPath), "publish_receipt.json"),
-    path.join(process.cwd(), "por/reports/publish_receipt.json"),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`Dosya bulunamadı: ${absolutePath}`);
   }
-  return null;
+
+  return JSON.parse(fs.readFileSync(absolutePath, "utf8")) as T;
 }
 
-function coerceAttestationRecord(rec: any) {
-  if (!rec) return null;
-  const asOfTimestamp = (rec.asOfTimestamp ?? rec[0]) as any;
-  const publishedAt = (rec.publishedAt ?? rec[1]) as any;
-  const attestedFineGoldGrams = (rec.attestedFineGoldGrams ?? rec[2]) as any;
-  const merkleRoot = (rec.merkleRoot ?? rec[3]) as any;
-  const barListHash = (rec.barListHash ?? rec[4]) as any;
-  const signer = (rec.signer ?? rec[5]) as any;
-
-  return {
-    asOfTimestamp: asOfTimestamp?.toString?.() ?? asOfTimestamp,
-    publishedAt: publishedAt?.toString?.() ?? publishedAt,
-    attestedFineGoldGrams: attestedFineGoldGrams?.toString?.() ?? attestedFineGoldGrams,
-    merkleRoot,
-    barListHash,
-    signer,
-  };
+function envStr(key: string): string {
+  return (process.env[key] || "").trim();
 }
 
-function assertInteger(n: any, name: string) {
-  if (typeof n !== "number" || !Number.isInteger(n)) {
-    throw new Error(`${name} integer olmalı. Aldım: ${n}`);
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${name} non-empty string olmalı.`);
   }
+  return value;
 }
 
-function assertAddress(addr: any, name: string) {
-  if (typeof addr !== "string") throw new Error(`${name} string değil.`);
-  normalizeAddress(addr);
+function toUintBigIntStrict(value: unknown, name: string): bigint {
+  if (typeof value === "bigint" || typeof value === "number" || typeof value === "string") {
+    return toUintBigInt(value, name);
+  }
+
+  throw new Error(`${name} bigint|number|string olmalı. Aldım: ${String(value)}`);
 }
 
-function assertSig65(sig: string) {
-  if (typeof sig !== "string") throw new Error("signature string değil.");
-  if (!/^0x[a-fA-F0-9]{130}$/.test(sig)) {
+function toDecimalString(value: unknown, name: string): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!DECIMAL_UINT_REGEX.test(trimmed)) {
+      throw new Error(`${name} decimal uint string olmalı. Aldım: ${value}`);
+    }
+    return trimmed;
+  }
+
+  return toUintBigIntStrict(value, name).toString();
+}
+
+function toPositiveSafeInteger(value: unknown, name: string): number {
+  const asBigInt = toUintBigIntStrict(value, name);
+
+  if (asBigInt < 1n) {
+    throw new Error(`${name} >= 1 olmalı. Aldım: ${asBigInt.toString()}`);
+  }
+
+  if (asBigInt > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`${name} MAX_SAFE_INTEGER üstünde olamaz. Aldım: ${asBigInt.toString()}`);
+  }
+
+  return Number(asBigInt);
+}
+
+function toUint64String(value: unknown, name: string): string {
+  const asBigInt = toUintBigIntStrict(value, name);
+
+  if (asBigInt > UINT64_MAX) {
+    throw new Error(`${name} uint64 sınırını aşıyor. Aldım: ${asBigInt.toString()}`);
+  }
+
+  return asBigInt.toString();
+}
+
+function normalizeAddressStrict(address: string, name: string): string {
+  const normalized = normalizeAddress(address);
+
+  if (!isAddress(normalized)) {
+    throw new Error(`${name} invalid address: ${address}`);
+  }
+
+  const checksummed = getAddress(normalized);
+  if (checksummed.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+    throw new Error(`${name} ZERO address olamaz.`);
+  }
+
+  return checksummed;
+}
+
+function assertSig65(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
+    throw new Error("signature string değil.");
+  }
+
+  if (!/^0x[a-fA-F0-9]{130}$/.test(value)) {
     throw new Error("signature 65-byte hex değil (0x + 130 hex).");
   }
 }
 
-function basicValidate(j: any): Attestation {
-  if (!j || typeof j !== "object") throw new Error("Attestation JSON object değil.");
-  if (j.schema_version !== "0.1") throw new Error("schema_version 0.1 değil.");
-  if (j.signature_scheme !== "eip712") throw new Error("signature_scheme eip712 değil.");
-  if (j.eip712_types_version !== "0.1") throw new Error("eip712_types_version 0.1 değil.");
+function basicValidate(value: unknown): Attestation {
+  if (!isRecord(value)) {
+    throw new Error("Attestation JSON object değil.");
+  }
 
-  if (typeof j.report_id !== "string" || !j.report_id) throw new Error("report_id invalid.");
-  assertInteger(j.as_of_timestamp, "as_of_timestamp");
-  assertInteger(j.attested_fine_gold_grams, "attested_fine_gold_grams");
-  assertInteger(j.chain_id, "chain_id");
+  if (value.schema_version !== "0.1") {
+    throw new Error("schema_version 0.1 değil.");
+  }
 
-  if (typeof j.merkle_root !== "string") throw new Error("merkle_root invalid.");
-  if (typeof j.bar_list_hash !== "string") throw new Error("bar_list_hash invalid.");
-  assertBytes32Hex(j.merkle_root, "merkle_root");
-  assertBytes32Hex(j.bar_list_hash, "bar_list_hash");
+  if (value.signature_scheme !== "eip712") {
+    throw new Error("signature_scheme eip712 değil.");
+  }
 
-  assertAddress(j.reserve_registry_address, "reserve_registry_address");
-  assertAddress(j.signer_address, "signer_address");
-  assertSig65(j.signature);
+  if (value.eip712_types_version !== "0.1") {
+    throw new Error("eip712_types_version 0.1 değil.");
+  }
 
-  if (!j.eip712_domain || typeof j.eip712_domain !== "object") throw new Error("eip712_domain missing.");
-  if (j.eip712_domain.name !== "GRUSH Reserve Attestation") throw new Error("domain.name mismatch.");
-  if (j.eip712_domain.version !== "1") throw new Error("domain.version mismatch.");
-  assertInteger(j.eip712_domain.chainId, "domain.chainId");
-  assertAddress(j.eip712_domain.verifyingContract, "domain.verifyingContract");
+  const report_id = requireString(value.report_id, "report_id");
+  const as_of_timestamp = toUint64String(value.as_of_timestamp, "as_of_timestamp");
+  const attested_fine_gold_grams = toDecimalString(
+    value.attested_fine_gold_grams,
+    "attested_fine_gold_grams"
+  );
 
-  return j as Attestation;
+  const merkle_root = requireString(value.merkle_root, "merkle_root");
+  const bar_list_hash = requireString(value.bar_list_hash, "bar_list_hash");
+
+  assertBytes32Hex(merkle_root, "merkle_root");
+  assertBytes32Hex(bar_list_hash, "bar_list_hash");
+
+  const chain_id = toPositiveSafeInteger(value.chain_id, "chain_id");
+
+  const reserve_registry_address = normalizeAddressStrict(
+    requireString(value.reserve_registry_address, "reserve_registry_address"),
+    "reserve_registry_address"
+  );
+
+  const signer_address = normalizeAddressStrict(
+    requireString(value.signer_address, "signer_address"),
+    "signer_address"
+  );
+
+  assertSig65(value.signature);
+
+  if (!isRecord(value.eip712_domain)) {
+    throw new Error("eip712_domain missing.");
+  }
+
+  if (value.eip712_domain.name !== "GRUSH Reserve Attestation") {
+    throw new Error("domain.name mismatch.");
+  }
+
+  if (value.eip712_domain.version !== "1") {
+    throw new Error("domain.version mismatch.");
+  }
+
+  const domainChainId = toPositiveSafeInteger(value.eip712_domain.chainId, "domain.chainId");
+
+  const verifyingContract = normalizeAddressStrict(
+    requireString(value.eip712_domain.verifyingContract, "domain.verifyingContract"),
+    "domain.verifyingContract"
+  );
+
+  return {
+    schema_version: "0.1",
+    report_id,
+    as_of_timestamp,
+    attested_fine_gold_grams,
+    merkle_root,
+    bar_list_hash,
+    chain_id,
+    reserve_registry_address,
+    signer_address,
+    signature_scheme: "eip712",
+    eip712_domain: {
+      name: "GRUSH Reserve Attestation",
+      version: "1",
+      chainId: domainChainId,
+      verifyingContract,
+    },
+    eip712_types_version: "0.1",
+    signature: value.signature,
+  };
 }
 
-function getVerifyTypedDataFn() {
-  const v6 = (ethers as any).verifyTypedData;
-  if (typeof v6 === "function") return v6;
+function tryFindReceiptPath(attestationPath: string): string | null {
+  const reportIdDir = path.dirname(attestationPath);
+  const reportId = path.basename(reportIdDir);
 
-  const v5 = (ethers as any).utils?.verifyTypedData;
-  if (typeof v5 === "function") return v5;
+  const candidates = [
+    path.join(reportIdDir, "publish_receipt.json"),
+    path.join(process.cwd(), "transparency", "attestations", reportId, "publish_receipt.json"),
+    path.join(process.cwd(), "por", "reports", "publish_receipt.json"),
+  ];
 
-  throw new Error("ethers verifyTypedData bulunamadı (ethers v5/v6 uyumsuz?).");
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
-async function main() {
+function resolveRpc(chainId: number, explicitRpc: string): { rpc: string; source: string } {
+  const byArg = explicitRpc.trim();
+  if (byArg) {
+    return { rpc: byArg, source: "--rpc" };
+  }
+
+  if (chainId === 11155111) {
+    const sepolia = envStr("SEPOLIA_RPC_URL");
+    if (sepolia) {
+      return { rpc: sepolia, source: "SEPOLIA_RPC_URL" };
+    }
+  }
+
+  if (chainId === 1) {
+    const mainnet = envStr("MAINNET_RPC_URL");
+    if (mainnet) {
+      return { rpc: mainnet, source: "MAINNET_RPC_URL" };
+    }
+  }
+
+  const fallback = envStr("RPC_URL");
+  if (fallback) {
+    return { rpc: fallback, source: "RPC_URL" };
+  }
+
+  return { rpc: "", source: "none" };
+}
+
+function parsePublishReceipt(value: unknown): PublishReceipt {
+  if (!isRecord(value)) {
+    throw new Error("publish_receipt JSON object değil.");
+  }
+
+  return {
+    ...(value.registry !== undefined
+      ? { registry: requireString(value.registry, "receipt.registry") }
+      : {}),
+    ...(value.chainId !== undefined
+      ? { chainId: toDecimalString(value.chainId, "receipt.chainId") }
+      : {}),
+    ...(value.reportId !== undefined
+      ? { reportId: requireString(value.reportId, "receipt.reportId") }
+      : {}),
+    ...(value.report_id !== undefined
+      ? { report_id: requireString(value.report_id, "receipt.report_id") }
+      : {}),
+    ...(value.publishedReportId !== undefined
+      ? {
+          publishedReportId: requireString(
+            value.publishedReportId,
+            "receipt.publishedReportId"
+          ),
+        }
+      : {}),
+    ...(value.txHash !== undefined
+      ? { txHash: requireString(value.txHash, "receipt.txHash") }
+      : {}),
+    ...(value.blockNumber !== undefined
+      ? { blockNumber: toDecimalString(value.blockNumber, "receipt.blockNumber") }
+      : {}),
+    ...(value.status !== undefined
+      ? { status: toDecimalString(value.status, "receipt.status") }
+      : {}),
+  };
+}
+
+function getTupleField(record: unknown, key: string, index: number): unknown {
+  if (isRecord(record) && key in record) {
+    return record[key];
+  }
+
+  if (Array.isArray(record)) {
+    return record[index];
+  }
+
+  return undefined;
+}
+
+function coerceTupleValueToString(value: unknown, name: string): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "bigint") {
+    return value.toString();
+  }
+
+  if (isRecord(value) && "toString" in value && typeof value.toString === "function") {
+    return value.toString();
+  }
+
+  throw new Error(`${name} tuple field parse edilemedi.`);
+}
+
+function coerceAttestationRecord(record: unknown): OnchainAttestationRecord {
+  const asOfTimestamp = coerceTupleValueToString(
+    getTupleField(record, "asOfTimestamp", 0),
+    "record.asOfTimestamp"
+  );
+  const publishedAt = coerceTupleValueToString(
+    getTupleField(record, "publishedAt", 1),
+    "record.publishedAt"
+  );
+  const attestedFineGoldGrams = coerceTupleValueToString(
+    getTupleField(record, "attestedFineGoldGrams", 2),
+    "record.attestedFineGoldGrams"
+  );
+  const merkleRoot = coerceTupleValueToString(
+    getTupleField(record, "merkleRoot", 3),
+    "record.merkleRoot"
+  );
+  const barListHash = coerceTupleValueToString(
+    getTupleField(record, "barListHash", 4),
+    "record.barListHash"
+  );
+  const signer = coerceTupleValueToString(getTupleField(record, "signer", 5), "record.signer");
+
+  assertBytes32Hex(merkleRoot, "record.merkleRoot");
+  assertBytes32Hex(barListHash, "record.barListHash");
+
+  return {
+    asOfTimestamp,
+    publishedAt,
+    attestedFineGoldGrams,
+    merkleRoot,
+    barListHash,
+    signer: normalizeAddressStrict(signer, "record.signer"),
+  };
+}
+
+function hexEquals(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+async function main(): Promise<void> {
   const args = parseArgs(process.argv);
-  if (args.help) usageAndExit(0);
+  if (args.help) {
+    usageAndExit(0);
+  }
 
-  const inPath = (args.in as string) || "";
-  if (!inPath) usageAndExit(1);
+  const inPath = typeof args.in === "string" ? args.in : "";
+  if (!inPath) {
+    usageAndExit(1);
+  }
 
-  const expect = (args.expect as string) || "";
-  const receiptArg = (args.receipt as string) || "";
-  const rpc = (args.rpc as string) || process.env.RPC_URL || "";
+  const expect = typeof args.expect === "string" ? args.expect : "";
+  const receiptArg = typeof args.receipt === "string" ? args.receipt : "";
+  const rpcArg = typeof args.rpc === "string" ? args.rpc : "";
   const quiet = Boolean(args.quiet);
 
-  const absIn = path.isAbsolute(inPath) ? inPath : path.join(process.cwd(), inPath);
-  const raw = fs.readFileSync(absIn, "utf8");
-  const att = basicValidate(JSON.parse(raw));
+  const absoluteInputPath = path.isAbsolute(inPath) ? inPath : path.join(process.cwd(), inPath);
+  const attestation = basicValidate(readJsonFile<unknown>(absoluteInputPath));
 
-  const registry = normalizeAddress(att.reserve_registry_address);
-  const signer = normalizeAddress(att.signer_address);
+  const registry = normalizeAddressStrict(
+    attestation.reserve_registry_address,
+    "reserve_registry_address"
+  );
+  const signer = normalizeAddressStrict(attestation.signer_address, "signer_address");
+  const reportIdBytes32 = reportIdToBytes32(attestation.report_id);
 
-  if (att.chain_id !== att.eip712_domain.chainId) {
-    throw new Error(`chain_id (${att.chain_id}) != domain.chainId (${att.eip712_domain.chainId})`);
+  if (attestation.chain_id !== attestation.eip712_domain.chainId) {
+    throw new Error(
+      `chain_id (${attestation.chain_id}) != domain.chainId (${attestation.eip712_domain.chainId})`
+    );
   }
-  if (normalizeAddress(att.eip712_domain.verifyingContract) !== registry) {
+
+  if (
+    normalizeAddressStrict(
+      attestation.eip712_domain.verifyingContract,
+      "domain.verifyingContract"
+    ) !== registry
+  ) {
     throw new Error("domain.verifyingContract reserve_registry_address ile uyuşmuyor.");
   }
 
-  const domain = {
+  const domain: TypedDataDomain = {
     name: "GRUSH Reserve Attestation",
     version: "1",
-    chainId: att.chain_id,
+    chainId: attestation.chain_id,
     verifyingContract: registry,
   };
 
-  const types = {
+  const types: TypedDataTypes = {
     ReserveAttestation: [
       { name: "reportId", type: "bytes32" },
       { name: "asOfTimestamp", type: "uint64" },
@@ -227,105 +526,193 @@ async function main() {
     ],
   };
 
-  const message = {
-    reportId: reportIdToBytes32(att.report_id),
-    asOfTimestamp: att.as_of_timestamp,
-    attestedFineGoldGrams: att.attested_fine_gold_grams,
-    merkleRoot: att.merkle_root,
-    barListHash: att.bar_list_hash,
+  const message: Record<string, unknown> = {
+    reportId: reportIdBytes32,
+    asOfTimestamp: attestation.as_of_timestamp,
+    attestedFineGoldGrams: attestation.attested_fine_gold_grams,
+    merkleRoot: attestation.merkle_root,
+    barListHash: attestation.bar_list_hash,
   };
 
-  const verifyTypedData = getVerifyTypedDataFn();
-  const recovered = normalizeAddress(verifyTypedData(domain, types, message, att.signature));
+  const recovered = normalizeAddressStrict(
+    verifyTypedData(domain, types, message, attestation.signature),
+    "recovered_signer"
+  );
 
   if (recovered !== signer) {
-    throw new Error(`Recovered signer mismatch. recovered=${recovered}, attestation.signer_address=${signer}`);
+    throw new Error(
+      `Recovered signer mismatch. recovered=${recovered}, attestation.signer_address=${signer}`
+    );
   }
 
   if (expect) {
-    const exp = normalizeAddress(expect);
-    if (recovered !== exp) {
-      throw new Error(`Expected signer mismatch. recovered=${recovered}, expected=${exp}`);
+    const expectedSigner = normalizeAddressStrict(expect, "--expect");
+    if (recovered !== expectedSigner) {
+      throw new Error(
+        `Expected signer mismatch. recovered=${recovered}, expected=${expectedSigner}`
+      );
     }
   }
 
-  let onchainOut: any = null;
-  const autoReceipt = receiptArg ? null : tryFindReceiptPath(absIn);
-  const receiptPath = (receiptArg || autoReceipt || "").trim();
+  let onchainOutput:
+    | {
+        ok: true;
+        rpc_source: string;
+        receipt_path: string;
+        receipt: {
+          registry: string | null;
+          chainId: string | null;
+          txHash: string | null;
+          blockNumber: string | null;
+          status: string | null;
+        };
+        record: OnchainAttestationRecord;
+      }
+    | undefined;
+
+  const autoReceiptPath = receiptArg ? null : tryFindReceiptPath(absoluteInputPath);
+  const receiptPath = (receiptArg || autoReceiptPath || "").trim();
+
   if (receiptPath) {
+    const receipt = parsePublishReceipt(readJsonFile<unknown>(receiptPath));
+
+    if (receipt.registry) {
+      const receiptRegistry = normalizeAddressStrict(receipt.registry, "receipt.registry");
+      if (receiptRegistry !== registry) {
+        throw new Error(
+          `Receipt registry mismatch. receipt=${receiptRegistry}, attestation=${registry}`
+        );
+      }
+    }
+
+    if (receipt.chainId !== undefined) {
+      const receiptChainId = toPositiveSafeInteger(receipt.chainId, "receipt.chainId");
+      if (receiptChainId !== attestation.chain_id) {
+        throw new Error(
+          `Receipt chainId mismatch. receipt=${receiptChainId}, attestation.chain_id=${attestation.chain_id}`
+        );
+      }
+    }
+
+    if (receipt.report_id !== undefined && receipt.report_id !== attestation.report_id) {
+      throw new Error(
+        `Receipt report_id mismatch. receipt=${receipt.report_id}, attestation=${attestation.report_id}`
+      );
+    }
+
+    if (receipt.reportId !== undefined) {
+      assertBytes32Hex(receipt.reportId, "receipt.reportId");
+      if (!hexEquals(receipt.reportId, reportIdBytes32)) {
+        throw new Error(
+          `Receipt reportId mismatch. receipt=${receipt.reportId}, computed=${reportIdBytes32}`
+        );
+      }
+    }
+
+    if (receipt.publishedReportId !== undefined) {
+      assertBytes32Hex(receipt.publishedReportId, "receipt.publishedReportId");
+      if (!hexEquals(receipt.publishedReportId, reportIdBytes32)) {
+        throw new Error(
+          `Receipt publishedReportId mismatch. receipt=${receipt.publishedReportId}, computed=${reportIdBytes32}`
+        );
+      }
+    }
+
+    if (receipt.status !== undefined && receipt.status !== "1") {
+      throw new Error(`Receipt status != 1. Aldım: ${receipt.status}`);
+    }
+
+    const { rpc, source } = resolveRpc(attestation.chain_id, rpcArg);
     if (!rpc) {
-      throw new Error(`Receipt bulundu ama RPC yok. --rpc ver veya RPC_URL env set et. receipt=${receiptPath}`);
+      throw new Error(
+        `Receipt bulundu ama RPC yok. --rpc ver veya uygun env set et (SEPOLIA_RPC_URL / MAINNET_RPC_URL / RPC_URL). receipt=${receiptPath}`
+      );
     }
 
-    const rc = readJson<PublishReceipt>(receiptPath);
-    const rcRegistry = rc.registry ? normalizeAddress(rc.registry) : "";
-    const rcChainId = rc.chainId;
-    const rcReportId = rc.reportId;
+    const provider = new JsonRpcProvider(rpc);
+    const network = await provider.getNetwork();
+    const providerChainId = Number(network.chainId);
 
-    if (rcRegistry && rcRegistry !== registry) {
-      throw new Error(`Receipt registry mismatch. receipt=${rcRegistry}, attestation=${registry}`);
-    }
-    if (typeof rcChainId === "number" && rcChainId !== att.chain_id) {
-      throw new Error(`Receipt chainId mismatch. receipt=${rcChainId}, attestation.chain_id=${att.chain_id}`);
-    }
-    if (typeof rcReportId === "string" && rcReportId.toLowerCase() !== reportIdToBytes32(att.report_id).toLowerCase()) {
-      throw new Error(`Receipt reportId mismatch. receipt=${rcReportId}, computed=${reportIdToBytes32(att.report_id)}`);
+    if (providerChainId !== attestation.chain_id) {
+      throw new Error(
+        `RPC chainId mismatch. rpc=${providerChainId}, attestation.chain_id=${attestation.chain_id}`
+      );
     }
 
-    const provider = getProvider(rpc);
-    const net = await provider.getNetwork();
-    const chainId = Number((net as any).chainId ?? (net as any).chainId?.toString?.());
-    if (chainId !== att.chain_id) {
-      throw new Error(`RPC chainId mismatch. rpc=${chainId}, attestation.chain_id=${att.chain_id}`);
+    const registryContract = new Contract(
+      registry,
+      REGISTRY_ABI,
+      provider
+    ) as RegistryContractLike;
+
+    const exists = await registryContract.exists(reportIdBytes32);
+    if (!exists) {
+      throw new Error(`On-chain attestation bulunamadı: reportId=${reportIdBytes32}`);
     }
 
-    const onchainRegistry = new (ethers as any).Contract(registry, REGISTRY_ABI, provider);
-    const rid = reportIdToBytes32(att.report_id);
-    const exists = await onchainRegistry.exists(rid);
-    if (!exists) throw new Error(`On-chain attestation bulunamadı: reportId=${rid}`);
+    const record = coerceAttestationRecord(await registryContract.getAttestation(reportIdBytes32));
 
-    const rec = await onchainRegistry.getAttestation(rid);
-    const norm = coerceAttestationRecord(rec);
+    if (record.asOfTimestamp !== attestation.as_of_timestamp) {
+      throw new Error(
+        `On-chain asOfTimestamp mismatch. onchain=${record.asOfTimestamp}, attestation=${attestation.as_of_timestamp}`
+      );
+    }
 
-    if (String(norm.asOfTimestamp) !== String(att.as_of_timestamp)) throw new Error(`On-chain asOfTimestamp mismatch.`);
-    if (String(norm.attestedFineGoldGrams) !== String(att.attested_fine_gold_grams)) throw new Error(`On-chain attestedFineGoldGrams mismatch.`);
-    if (String(norm.merkleRoot).toLowerCase() !== String(att.merkle_root).toLowerCase()) throw new Error(`On-chain merkleRoot mismatch.`);
-    if (String(norm.barListHash).toLowerCase() !== String(att.bar_list_hash).toLowerCase()) throw new Error(`On-chain barListHash mismatch.`);
-    if (normalizeAddress(norm.signer) !== recovered) throw new Error(`On-chain signer mismatch.`);
+    if (record.attestedFineGoldGrams !== attestation.attested_fine_gold_grams) {
+      throw new Error(
+        `On-chain attestedFineGoldGrams mismatch. onchain=${record.attestedFineGoldGrams}, attestation=${attestation.attested_fine_gold_grams}`
+      );
+    }
 
-    onchainOut = {
+    if (!hexEquals(record.merkleRoot, attestation.merkle_root)) {
+      throw new Error("On-chain merkleRoot mismatch.");
+    }
+
+    if (!hexEquals(record.barListHash, attestation.bar_list_hash)) {
+      throw new Error("On-chain barListHash mismatch.");
+    }
+
+    if (record.signer !== recovered) {
+      throw new Error(`On-chain signer mismatch. onchain=${record.signer}, recovered=${recovered}`);
+    }
+
+    onchainOutput = {
       ok: true,
+      rpc_source: source,
       receipt_path: receiptPath,
       receipt: {
-        registry: rc.registry ?? null,
-        chainId: rc.chainId ?? null,
-        txHash: rc.txHash ?? null,
-        blockNumber: rc.blockNumber ?? null,
-        status: rc.status ?? null,
+        registry: receipt.registry ?? null,
+        chainId: receipt.chainId ?? null,
+        txHash: receipt.txHash ?? null,
+        blockNumber: receipt.blockNumber ?? null,
+        status: receipt.status ?? null,
       },
-      record: norm,
+      record,
     };
   }
 
   if (!quiet) {
-    const out: any = {
+    const out = {
       ok: true,
       recovered_signer: recovered,
       registry,
-      chain_id: att.chain_id,
-      report_id: att.report_id,
-      report_id_bytes32: reportIdToBytes32(att.report_id),
-      as_of_timestamp: att.as_of_timestamp,
-      attested_fine_gold_grams: att.attested_fine_gold_grams,
-      merkle_root: att.merkle_root,
-      bar_list_hash: att.bar_list_hash,
+      chain_id: attestation.chain_id,
+      report_id: attestation.report_id,
+      report_id_bytes32: reportIdBytes32,
+      as_of_timestamp: attestation.as_of_timestamp,
+      attested_fine_gold_grams: attestation.attested_fine_gold_grams,
+      merkle_root: attestation.merkle_root,
+      bar_list_hash: attestation.bar_list_hash,
+      ...(onchainOutput ? { onchain: onchainOutput } : {}),
     };
-    if (onchainOut) out.onchain = onchainOut;
+
+    // eslint-disable-next-line no-console
     console.log(JSON.stringify(out, null, 2));
   }
 }
 
-main().catch((e) => {
-  console.error("FAIL:", e?.message ?? e);
+main().catch((error: unknown) => {
+  // eslint-disable-next-line no-console
+  console.error(`FAIL: ${errorMessage(error)}`);
   process.exit(1);
 });

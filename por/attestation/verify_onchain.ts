@@ -12,7 +12,7 @@ type Attestation = {
   schema_version: "0.1";
   report_id: string;
   as_of_timestamp: number;
-  attested_fine_gold_grams: number;
+  attested_fine_gold_grams: string; // uint256 decimal string
   merkle_root: string;
   bar_list_hash: string;
   chain_id: number;
@@ -82,10 +82,27 @@ function parseArgs(argv: string[]) {
   return args;
 }
 
+const MAX_SAFE_INTEGER = 9007199254740991;
+
 function assertInteger(n: any, name: string) {
-  if (typeof n !== "number" || !Number.isInteger(n)) {
-    throw new Error(`${name} integer olmalı. Aldım: ${n}`);
+  if (typeof n !== "number" || !Number.isSafeInteger(n)) {
+    throw new Error(`${name} integer olmalı (safe). Aldım: ${n}`);
   }
+}
+
+function coerceUint256DecimalString(v: any, name: string): string {
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (/^[1-9][0-9]*$/.test(s)) return s;
+    throw new Error(`${name} uint256 decimal string olmalı (>=1). Aldım: ${v}`);
+  }
+  if (typeof v === "number") {
+    if (!Number.isSafeInteger(v) || v < 1) {
+      throw new Error(`${name} integer olmalı ve <= MAX_SAFE_INTEGER (${MAX_SAFE_INTEGER}). Aldım: ${v}`);
+    }
+    return String(v);
+  }
+  throw new Error(`${name} uint256 decimal string olmalı. Aldım: ${typeof v}`);
 }
 
 function assertHexBytes32(s: any, name: string) {
@@ -106,7 +123,7 @@ function loadAttestation(j: any): Attestation {
 
   if (typeof j.report_id !== "string" || !j.report_id) throw new Error("report_id invalid.");
   assertInteger(j.as_of_timestamp, "as_of_timestamp");
-  assertInteger(j.attested_fine_gold_grams, "attested_fine_gold_grams");
+  j.attested_fine_gold_grams = coerceUint256DecimalString(j.attested_fine_gold_grams, "attested_fine_gold_grams");
   assertInteger(j.chain_id, "chain_id");
 
   assertHexBytes32(j.merkle_root, "merkle_root");
@@ -230,7 +247,7 @@ async function main() {
   const ev = parsed.args;
 
   const evReportId = String(ev.reportId);
-  const evAsOf = Number(ev.asOfTimestamp);
+  const evAsOf = (ev.asOfTimestamp as any)?.toString?.() ?? String(ev.asOfTimestamp);
   const evGrams = (ev.attestedFineGoldGrams as any)?.toString?.() ?? String(ev.attestedFineGoldGrams);
   const evMerkleRoot = String(ev.merkleRoot);
   const evBarListHash = String(ev.barListHash);
@@ -239,10 +256,10 @@ async function main() {
   if (evReportId.toLowerCase() !== rc.publishedReportId.toLowerCase()) {
     throw new Error(`event.reportId mismatch. event=${evReportId} receipt=${rc.publishedReportId}`);
   }
-  if (evAsOf !== att.as_of_timestamp) {
+  if (String(evAsOf) !== String(att.as_of_timestamp)) {
     throw new Error(`event.asOfTimestamp mismatch. event=${evAsOf} attestation=${att.as_of_timestamp}`);
   }
-  if (evGrams !== String(att.attested_fine_gold_grams)) {
+  if (evGrams !== att.attested_fine_gold_grams) {
     throw new Error(`event.attestedFineGoldGrams mismatch. event=${evGrams} attestation=${att.attested_fine_gold_grams}`);
   }
   if (evMerkleRoot.toLowerCase() !== att.merkle_root.toLowerCase()) {
@@ -257,17 +274,17 @@ async function main() {
 
   // 2) Contract-state cross-check
   const rec = await registry.getAttestation(rc.publishedReportId);
-  const stAsOf = Number(rec.asOfTimestamp);
+  const stAsOf = (rec.asOfTimestamp as any)?.toString?.() ?? String(rec.asOfTimestamp);
   const stPublishedAt = Number(rec.publishedAt);
   const stGrams = rec.attestedFineGoldGrams?.toString?.() ?? String(rec.attestedFineGoldGrams);
   const stMerkleRoot = String(rec.merkleRoot);
   const stBarListHash = String(rec.barListHash);
   const stSigner = normalizeAddress(String(rec.signer));
 
-  if (stAsOf !== att.as_of_timestamp) {
+  if (String(stAsOf) !== String(att.as_of_timestamp)) {
     throw new Error(`state.asOfTimestamp mismatch. state=${stAsOf} attestation=${att.as_of_timestamp}`);
   }
-  if (stGrams !== String(att.attested_fine_gold_grams)) {
+  if (stGrams !== att.attested_fine_gold_grams) {
     throw new Error(`state.attestedFineGoldGrams mismatch. state=${stGrams} attestation=${att.attested_fine_gold_grams}`);
   }
   if (stMerkleRoot.toLowerCase() !== att.merkle_root.toLowerCase()) {

@@ -19,17 +19,48 @@ type TxOverrides = {
   maxPriorityFeePerGas?: bigint;
 };
 
+type ContractTx = {
+  hash: string;
+  wait: (confirmations?: number) => Promise<{ status?: number | null } | null>;
+};
+
+type ReserveRegistryLike = {
+  waitForDeployment: () => Promise<unknown>;
+  getAddress: () => Promise<string>;
+  connect: (signer: unknown) => ReserveRegistryLike;
+  setAllowedSigners: (
+    signers: string[],
+    allowed: boolean[],
+    overrides?: TxOverrides
+  ) => Promise<ContractTx>;
+};
+
+type VerifyTaskArgs = {
+  address: string;
+  constructorArguments: unknown[];
+};
+
+type VerifyTaskRunner = {
+  run: (taskName: string, taskArgs: VerifyTaskArgs) => Promise<unknown>;
+};
+
 class NonceManager {
   private next?: number;
+
   constructor(start?: number) {
     this.next = start;
   }
+
   public with(overrides: TxOverrides): TxOverrides {
     if (this.next === undefined) return overrides;
     const o: TxOverrides = { ...overrides, nonce: this.next };
     this.next += 1;
     return o;
   }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function envBool(key: string, def = false): boolean {
@@ -46,23 +77,37 @@ function envNum(key: string): number | undefined {
   return n;
 }
 
-function buildBaseTxOverrides(ethers: any): TxOverrides {
+function envGwei(
+  ethers: { parseUnits: (value: string, unit: string) => bigint },
+  key: string
+): bigint | undefined {
+  const v = (process.env[key] || "").trim();
+  if (!v) return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${key} invalid gwei: ${v}`);
+  return ethers.parseUnits(v, "gwei");
+}
+
+function buildBaseTxOverrides(
+  ethers: { parseUnits: (value: string, unit: string) => bigint }
+): TxOverrides {
   const gasLimitNum = envNum("GAS_LIMIT");
   const gasLimit = gasLimitNum !== undefined ? BigInt(gasLimitNum) : undefined;
 
-  const gasPriceGwei = (process.env.GAS_PRICE_GWEI || "").trim();
-  const maxFeeGwei = (process.env.MAX_FEE_GWEI || "").trim();
-  const maxPrioGwei = (process.env.MAX_PRIORITY_GWEI || "").trim();
-
-  const gasPrice = gasPriceGwei ? ethers.parseUnits(gasPriceGwei, "gwei") : undefined;
-  const maxFeePerGas = maxFeeGwei ? ethers.parseUnits(maxFeeGwei, "gwei") : undefined;
-  const maxPriorityFeePerGas = maxPrioGwei ? ethers.parseUnits(maxPrioGwei, "gwei") : undefined;
+  const gasPrice = envGwei(ethers, "GAS_PRICE_GWEI");
+  const maxFeePerGas = envGwei(ethers, "MAX_FEE_GWEI");
+  const maxPriorityFeePerGas = envGwei(ethers, "MAX_PRIORITY_GWEI");
 
   if (gasPrice && (maxFeePerGas || maxPriorityFeePerGas)) {
-    throw new Error("Fee config invalid: GAS_PRICE_GWEI ile MAX_FEE_GWEI/MAX_PRIORITY_GWEI aynı anda set edilmez.");
+    throw new Error(
+      "Fee config invalid: GAS_PRICE_GWEI ile MAX_FEE_GWEI/MAX_PRIORITY_GWEI aynı anda set edilmez."
+    );
   }
+
   if ((maxFeePerGas && !maxPriorityFeePerGas) || (!maxFeePerGas && maxPriorityFeePerGas)) {
-    throw new Error("Fee config invalid: EIP-1559 için MAX_FEE_GWEI ve MAX_PRIORITY_GWEI birlikte set edilmeli.");
+    throw new Error(
+      "Fee config invalid: EIP-1559 için MAX_FEE_GWEI ve MAX_PRIORITY_GWEI birlikte set edilmeli."
+    );
   }
 
   const o: TxOverrides = {};
@@ -73,52 +118,62 @@ function buildBaseTxOverrides(ethers: any): TxOverrides {
   return o;
 }
 
-function assertMainnetConfirmed(chainId: number) {
+function assertMainnetConfirmed(chainId: number): void {
   if (chainId !== 1) return;
   const ok = envBool("CONFIRM_MAINNET_DEPLOY", false);
-  if (!ok) throw new Error("MAINNET LOCK: chainId=1 için CONFIRM_MAINNET_DEPLOY=true olmadan deploy yok.");
+  if (!ok) {
+    throw new Error("MAINNET LOCK: chainId=1 için CONFIRM_MAINNET_DEPLOY=true olmadan deploy yok.");
+  }
 }
 
-function envAddress(ethers: any, key: string, fallback: string, label: string): string {
+function envAddress(key: string, fallback: string, label: string): string {
   const v = process.env[key];
-  const a = v && v.trim().length > 0 ? v.trim() : fallback;
-  if (!ethers.isAddress(a)) throw new Error(`${label} invalid address: ${a}`);
-  return ethers.getAddress(a);
+  return v && v.trim().length > 0 ? normAddress(v.trim(), label) : fallback;
 }
 
-function parseCsvAddresses(ethers: any, csv: string | undefined): string[] {
+function parseCsvAddresses(csv: string | undefined, label: string): string[] {
   if (!csv) return [];
+
   const parts = csv
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
-  const out = parts.map((p) => {
-    if (!ethers.isAddress(p)) throw new Error(`REGISTRY_ALLOWED_SIGNERS invalid: ${p}`);
-    return ethers.getAddress(p);
-  });
+  const uniq: string[] = [];
+  const seen = new Set<string>();
 
-  return Array.from(new Set(out));
+  for (const part of parts) {
+    const addr = normAddress(part, label);
+    if (!seen.has(addr)) {
+      seen.add(addr);
+      uniq.push(addr);
+    }
+  }
+
+  return uniq;
 }
 
-async function maybeVerify(chainId: number, address: string, args: any[]) {
+async function runVerifyTask(taskArgs: VerifyTaskArgs): Promise<void> {
+  const runner = hre as unknown as VerifyTaskRunner;
+  await runner.run("verify:verify", taskArgs);
+}
+
+async function maybeVerify(chainId: number, address: string, args: unknown[]): Promise<void> {
   const verify = (process.env.VERIFY || "").toLowerCase() === "true";
   if (!verify) return;
 
-  // local'lerde boşver
   if (chainId === 31337 || chainId === 1337) return;
 
   try {
-    await hre.run("verify:verify", { address, constructorArguments: args });
+    await runVerifyTask({ address, constructorArguments: args });
     console.log(`Verified: ${address}`);
-  } catch (e: any) {
-    console.log(`Verify skipped/failed (non-fatal): ${e?.message ?? e}`);
+  } catch (err: unknown) {
+    console.log(`Verify skipped/failed (non-fatal): ${errorMessage(err)}`);
   }
 }
 
-async function main() {
-  // Hardhat 3 + hardhat-ethers: ethers instance network.connect() ile gelir
-  const { ethers } = await network.connect(); // seçilen network: --network sepolia
+async function main(): Promise<void> {
+  const { ethers } = await network.connect();
   const [deployer] = await ethers.getSigners();
   const deployerAddr = await deployer.getAddress();
 
@@ -133,11 +188,14 @@ async function main() {
   const nonceManager = new NonceManager(startNonce);
   const confirmations = envNum("TX_CONFIRMATIONS") ?? 1;
 
-  const admin = envAddress(ethers, "REGISTRY_ADMIN", deployerAddr, "REGISTRY_ADMIN");
-  const publisher = envAddress(ethers, "REGISTRY_PUBLISHER", deployerAddr, "REGISTRY_PUBLISHER");
-  const pauser = envAddress(ethers, "REGISTRY_PAUSER", deployerAddr, "REGISTRY_PAUSER");
+  const admin = envAddress("REGISTRY_ADMIN", deployerAddr, "REGISTRY_ADMIN");
+  const publisher = envAddress("REGISTRY_PUBLISHER", deployerAddr, "REGISTRY_PUBLISHER");
+  const pauser = envAddress("REGISTRY_PAUSER", deployerAddr, "REGISTRY_PAUSER");
 
-  const allowedSigners = parseCsvAddresses(ethers, process.env.REGISTRY_ALLOWED_SIGNERS);
+  const allowedSigners = parseCsvAddresses(
+    process.env.REGISTRY_ALLOWED_SIGNERS,
+    "REGISTRY_ALLOWED_SIGNERS"
+  );
 
   console.log(
     JSON.stringify(
@@ -160,6 +218,7 @@ async function main() {
           maxFeePerGasWei: baseOverrides.maxFeePerGas?.toString() ?? null,
           maxPriorityFeePerGasWei: baseOverrides.maxPriorityFeePerGas?.toString() ?? null,
         },
+        confirmMainnetDeploy: chainId === 1 ? true : null,
       },
       null,
       2
@@ -167,18 +226,27 @@ async function main() {
   );
 
   const ReserveRegistry = await ethers.getContractFactory("ReserveRegistry");
-  const registry = await ReserveRegistry.deploy(admin, publisher, pauser, nonceManager.with(baseOverrides));
+  const registry = (await ReserveRegistry.deploy(
+    admin,
+    publisher,
+    pauser,
+    nonceManager.with(baseOverrides)
+  )) as unknown as ReserveRegistryLike;
+
   await registry.waitForDeployment();
 
-  const registryAddr = await registry.getAddress();
+  const registryAddr = normAddress(await registry.getAddress(), "ReserveRegistry address");
   console.log(`ReserveRegistry deployed: ${registryAddr}`);
 
   if (allowedSigners.length > 0) {
     const bools = allowedSigners.map(() => true);
+
     const tx = await registry
       .connect(deployer)
       .setAllowedSigners(allowedSigners, bools, nonceManager.with(baseOverrides));
+
     const receipt = await tx.wait(confirmations);
+
     console.log(
       JSON.stringify(
         {
@@ -192,12 +260,14 @@ async function main() {
       )
     );
   } else {
-    console.log("NOTE: REGISTRY_ALLOWED_SIGNERS boş. publishAttestation çalışmaz; önce setAllowedSigner(true) yapmalısın.");
+    console.log(
+      "NOTE: REGISTRY_ALLOWED_SIGNERS boş. publishAttestation çalışmaz; önce setAllowedSigner(true) yapmalısın."
+    );
   }
 
   const book = loadAddressBook();
   upsertContract(book, chainKey, "ReserveRegistry", {
-    address: normAddress(registryAddr, "ReserveRegistry address"),
+    address: registryAddr,
     args: [admin, publisher, pauser],
     contract: "contracts/src/ReserveRegistry.sol:ReserveRegistry",
   });
@@ -206,10 +276,12 @@ async function main() {
 
   await maybeVerify(chainId, registryAddr, [admin, publisher, pauser]);
 
-  console.log(JSON.stringify({ ok: true, reserveRegistry: registryAddr, chainId, chainKey }, null, 2));
+  console.log(
+    JSON.stringify({ ok: true, reserveRegistry: registryAddr, chainId, chainKey }, null, 2)
+  );
 }
 
-main().catch((err) => {
-  console.error("DEPLOY FAIL:", err?.message ?? err);
+main().catch((err: unknown) => {
+  console.error("DEPLOY FAIL:", errorMessage(err));
   process.exit(1);
 });

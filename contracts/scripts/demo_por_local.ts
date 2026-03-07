@@ -1,67 +1,99 @@
 import hre from "hardhat";
+import type {
+  ContractRunner,
+  ContractTransactionResponse,
+  TypedDataDomain,
+  TypedDataField,
+} from "ethers";
+import { fileKeccak256Hex, leafHash, nodeHash } from "../../por/merkle/hash_utils.ts";
 
 const { ethers } = await hre.network.connect();
 
-function canonicalLeafJson(bar: {
+type TypedDataTypes = Record<string, TypedDataField[]>;
+
+type AddressSigner = ContractRunner & {
+  address: string;
+  signTypedData: (
+    domain: TypedDataDomain,
+    types: TypedDataTypes,
+    value: Record<string, unknown>
+  ) => Promise<string>;
+};
+
+type ReserveRegistryLike = {
+  getAddress(): Promise<string>;
+  waitForDeployment(): Promise<ReserveRegistryLike>;
+  connect(runner: ContractRunner | null): ReserveRegistryLike;
+
+  setAllowedSigner(
+    signer: string,
+    allowed: boolean
+  ): Promise<ContractTransactionResponse>;
+
+  publishAttestation(
+    reportId: string,
+    asOfTimestamp: bigint,
+    attestedFineGoldGrams: bigint,
+    merkleRoot: string,
+    barListHash: string,
+    signature: string
+  ): Promise<ContractTransactionResponse>;
+
+  latestReportId(): Promise<string>;
+  getReportIds(start: bigint | number, count: bigint | number): Promise<string[]>;
+};
+
+type DemoBar = {
   as_of_timestamp: number;
   fineness: string;
   fine_weight_g: number;
   refiner: string;
   serial_no: string;
   vault_id: string;
-}) {
-  // Key order: as_of_timestamp, fineness, fine_weight_g, refiner, serial_no, vault_id
-  return JSON.stringify({
-    as_of_timestamp: bar.as_of_timestamp,
-    fineness: bar.fineness,
-    fine_weight_g: bar.fine_weight_g,
-    refiner: bar.refiner,
-    serial_no: bar.serial_no,
-    vault_id: bar.vault_id,
-  });
-}
+};
 
-function leafHash(canonicalJson: string) {
-  const preimage = ethers.toUtf8Bytes(canonicalJson);
-  return ethers.keccak256(ethers.concat(["0x00", preimage]));
-}
+function merkleRootFromLeaves(leaves: string[]): string {
+  if (leaves.length === 0) {
+    return ethers.ZeroHash;
+  }
 
-function nodeHash(left: string, right: string) {
-  return ethers.keccak256(ethers.concat(["0x01", left, right]));
-}
-
-function merkleRootFromLeaves(leaves: string[]) {
-  if (leaves.length === 0) return ethers.ZeroHash;
   let level = [...leaves];
+
   while (level.length > 1) {
-    if (level.length % 2 === 1) level.push(level[level.length - 1]); // duplicate-last
+    if (level.length % 2 === 1) {
+      level.push(level[level.length - 1]);
+    }
+
     const next: string[] = [];
     for (let i = 0; i < level.length; i += 2) {
       next.push(nodeHash(level[i], level[i + 1]));
     }
     level = next;
   }
+
   return level[0];
 }
 
-async function main() {
-  const [admin, publisher, pauser, allowedSigner] = await ethers.getSigners();
+async function main(): Promise<void> {
+  const [admin, publisher, pauser, allowedSigner] =
+    (await ethers.getSigners()) as AddressSigner[];
 
-  const registry = await ethers.deployContract("ReserveRegistry", [
+  const deployed = await ethers.deployContract("ReserveRegistry", [
     admin.address,
     publisher.address,
     pauser.address,
   ]);
+
+  const registry = deployed as unknown as ReserveRegistryLike;
   await registry.waitForDeployment();
 
-  // allow signer
-  await (await registry.connect(admin).setAllowedSigner(allowedSigner.address, true)).wait();
+  await registry.connect(admin).setAllowedSigner(allowedSigner.address, true);
 
-  // demo bar list (1 bar)
-  const asOf = Math.floor(Date.now() / 1000);
+  const asOfNumber = Math.floor(Date.now() / 1000);
+  const asOf = BigInt(asOfNumber);
 
-  const bar = {
-    as_of_timestamp: asOf,
+  const bar: DemoBar = {
+    as_of_timestamp: asOfNumber,
     fineness: "999.9",
     fine_weight_g: 1000,
     refiner: "ACME",
@@ -69,26 +101,26 @@ async function main() {
     vault_id: "IST-VAULT-01",
   };
 
-  const canonical = canonicalLeafJson(bar);
-  const leaf = leafHash(canonical);
+  const leaf = leafHash(bar);
   const root = merkleRootFromLeaves([leaf]);
 
-  // In real flow, barListHash = keccak256(fileBytes). Here: keccak256(canonical bytes) as demo.
-  const barListHash = ethers.keccak256(ethers.toUtf8Bytes(canonical));
+  // Demo amaçlı: gerçek akışta bar_list_hash dosya byte'larının keccak256'sıdır.
+  // Burada tek-leaf canonical JSON byte'larını kullanıyoruz.
+  const barListHash = fileKeccak256Hex(ethers.toUtf8Bytes(JSON.stringify(bar)));
 
   const reportId = ethers.keccak256(ethers.toUtf8Bytes("demo-report-1"));
   const attestedFineGoldGrams = 1000n;
 
-  const chainId = (await ethers.provider.getNetwork()).chainId;
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
 
-  const domain = {
+  const domain: TypedDataDomain = {
     name: "GRUSH Reserve Attestation",
     version: "1",
     chainId,
     verifyingContract: await registry.getAddress(),
   };
 
-  const types = {
+  const types: TypedDataTypes = {
     ReserveAttestation: [
       { name: "reportId", type: "bytes32" },
       { name: "asOfTimestamp", type: "uint64" },
@@ -98,7 +130,7 @@ async function main() {
     ],
   };
 
-  const value = {
+  const value: Record<string, unknown> = {
     reportId,
     asOfTimestamp: asOf,
     attestedFineGoldGrams,
@@ -108,11 +140,9 @@ async function main() {
 
   const signature = await allowedSigner.signTypedData(domain, types, value);
 
-  await (
-    await registry
-      .connect(publisher)
-      .publishAttestation(reportId, asOf, attestedFineGoldGrams, root, barListHash, signature)
-  ).wait();
+  await registry
+    .connect(publisher)
+    .publishAttestation(reportId, asOf, attestedFineGoldGrams, root, barListHash, signature);
 
   const latest = await registry.latestReportId();
   const ids = await registry.getReportIds(999, 10);
@@ -125,7 +155,7 @@ async function main() {
   console.log("getReportIds(999,10).length:", ids.length);
 }
 
-main().catch((e) => {
-  console.error(e);
+main().catch((error: unknown) => {
+  console.error(error);
   process.exit(1);
 });

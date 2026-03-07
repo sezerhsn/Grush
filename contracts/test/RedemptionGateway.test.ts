@@ -1,47 +1,183 @@
 import { expect } from "chai";
 import hre from "hardhat";
 import { anyValue } from "@nomicfoundation/hardhat-ethers-chai-matchers/withArgs";
+import type {
+  ContractRunner,
+  ContractTransactionResponse,
+  Interface,
+  TransactionReceipt,
+} from "ethers";
 
 const { ethers } = await hre.network.connect();
 
-function b32(label: string) {
+type AddressSigner = ContractRunner & {
+  address: string;
+};
+
+type GRUSHTokenLike = {
+  getAddress(): Promise<string>;
+  waitForDeployment(): Promise<GRUSHTokenLike>;
+  connect(runner: ContractRunner | null): GRUSHTokenLike;
+
+  BURNER_ROLE(): Promise<string>;
+  grantRole(role: string, account: string): Promise<ContractTransactionResponse>;
+  mint(to: string, amount: bigint): Promise<ContractTransactionResponse>;
+  approve(spender: string, amount: bigint): Promise<ContractTransactionResponse>;
+  balanceOf(account: string): Promise<bigint>;
+  totalSupply(): Promise<bigint>;
+};
+
+type RedemptionRequest = {
+  requester: string;
+  amount: bigint;
+  destinationHash: string;
+  status: bigint;
+  decisionRef: string;
+  decidedBy: string;
+};
+
+type RedemptionGatewayLike = {
+  interface: Interface;
+  getAddress(): Promise<string>;
+  waitForDeployment(): Promise<RedemptionGatewayLike>;
+  connect(runner: ContractRunner | null): RedemptionGatewayLike;
+
+  requestRedemption(
+    amount: bigint,
+    destinationHash: string
+  ): Promise<ContractTransactionResponse>;
+  cancelRedemption(requestId: string): Promise<ContractTransactionResponse>;
+  rejectRedemption(
+    requestId: string,
+    reasonHash: string
+  ): Promise<ContractTransactionResponse>;
+  fulfillRedemption(
+    requestId: string,
+    fulfillmentRef: string
+  ): Promise<ContractTransactionResponse>;
+  getRequest(requestId: string): Promise<RedemptionRequest>;
+  paused(): Promise<boolean>;
+  pause(): Promise<ContractTransactionResponse>;
+  unpause(): Promise<ContractTransactionResponse>;
+};
+
+type RedemptionFixture = {
+  token: GRUSHTokenLike;
+  gateway: RedemptionGatewayLike;
+  admin: AddressSigner;
+  operator: AddressSigner;
+  pauser: AddressSigner;
+  minter: AddressSigner;
+  user: AddressSigner;
+  other: AddressSigner;
+};
+
+type ParseableLog = {
+  topics: readonly string[];
+  data: string;
+};
+
+function b32(label: string): string {
   return ethers.keccak256(ethers.toUtf8Bytes(label));
 }
 
-describe("RedemptionGateway", function () {
-  async function deployFixture() {
-    const [admin, operator, pauser, minter, burnerEOA, tokenPauser, user, other] =
-      await ethers.getSigners();
+function isParseableLog(value: unknown): value is ParseableLog {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
 
-    // Deploy GRUSHToken
+  const candidate = value as { topics?: unknown; data?: unknown };
+  return (
+    Array.isArray(candidate.topics) &&
+    candidate.topics.every((topic) => typeof topic === "string") &&
+    typeof candidate.data === "string"
+  );
+}
+
+function requireReceipt(receipt: TransactionReceipt | null): TransactionReceipt {
+  if (!receipt) {
+    throw new Error("Transaction receipt bulunamadı.");
+  }
+  return receipt;
+}
+
+function getRequestIdFromReceipt(
+  gateway: RedemptionGatewayLike,
+  receipt: TransactionReceipt
+): string {
+  for (const log of receipt.logs) {
+    if (!isParseableLog(log)) {
+      continue;
+    }
+
+    try {
+      const parsed = gateway.interface.parseLog({
+        topics: [...log.topics],
+        data: log.data,
+      });
+
+      if (!parsed || parsed.name !== "RedemptionRequested") {
+        continue;
+      }
+
+      const namedRequestId = Reflect.get(parsed.args, "requestId");
+      if (typeof namedRequestId === "string") {
+        return namedRequestId;
+      }
+
+      const positionalRequestId = parsed.args[0];
+      if (typeof positionalRequestId === "string") {
+        return positionalRequestId;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error("RedemptionRequested event not found");
+}
+
+describe("RedemptionGateway", function () {
+  async function deployFixture(): Promise<RedemptionFixture> {
+    const [admin, operator, pauser, minter, burnerEOA, tokenPauser, user, other] =
+      (await ethers.getSigners()) as AddressSigner[];
+
     const GRUSHToken = await ethers.getContractFactory("GRUSHToken");
-    const token = await GRUSHToken.deploy(
+    const deployedToken = await GRUSHToken.deploy(
       admin.address,
       minter.address,
       burnerEOA.address,
       tokenPauser.address
     );
+    const token = deployedToken as unknown as GRUSHTokenLike;
     await token.waitForDeployment();
 
-    // Deploy RedemptionGateway
     const RedemptionGateway = await ethers.getContractFactory("RedemptionGateway");
-    const gateway = await RedemptionGateway.deploy(
+    const deployedGateway = await RedemptionGateway.deploy(
       admin.address,
       await token.getAddress(),
       operator.address,
       pauser.address
     );
+    const gateway = deployedGateway as unknown as RedemptionGatewayLike;
     await gateway.waitForDeployment();
 
-    // Grant BURNER_ROLE to gateway so it can burn escrow on fulfill
-    const BURNER_ROLE = await token.BURNER_ROLE();
-    await token.connect(admin).grantRole(BURNER_ROLE, await gateway.getAddress());
+    const burnerRole = await token.BURNER_ROLE();
+    await token.connect(admin).grantRole(burnerRole, await gateway.getAddress());
 
-    // Mint some tokens to user
     const mintAmount = ethers.parseUnits("100", 18);
     await token.connect(minter).mint(user.address, mintAmount);
 
-    return { token, gateway, admin, operator, pauser, minter, user, other };
+    return {
+      token,
+      gateway,
+      admin,
+      operator,
+      pauser,
+      minter,
+      user,
+      other,
+    };
   }
 
   it("creates a request by escrowing tokens (requestRedemption)", async function () {
@@ -53,30 +189,18 @@ describe("RedemptionGateway", function () {
     await token.connect(user).approve(await gateway.getAddress(), amount);
 
     const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
-    const rc = await tx.wait();
+    const receipt = requireReceipt(await tx.wait());
 
-    // event check
     await expect(tx).to.emit(gateway, "RedemptionRequested");
 
-    // Parse requestId from event (safer than recompute)
-    const evt = rc!.logs.map((l: any) => {
-      try {
-        return gateway.interface.parseLog(l);
-      } catch {
-        return null;
-      }
-    }).find((x: any) => x && x.name === "RedemptionRequested");
-
-    expect(evt).to.not.equal(undefined);
-    const requestId = evt!.args.requestId as string;
-
+    const requestId = getRequestIdFromReceipt(gateway, receipt);
     const req = await gateway.getRequest(requestId);
+
     expect(req.requester).to.equal(user.address);
     expect(req.amount).to.equal(amount);
     expect(req.destinationHash).to.equal(destinationHash);
-    expect(req.status).to.equal(1); // Requested
+    expect(req.status).to.equal(1n);
 
-    // escrowed token moved to gateway
     expect(await token.balanceOf(await gateway.getAddress())).to.equal(amount);
   });
 
@@ -85,17 +209,13 @@ describe("RedemptionGateway", function () {
 
     const amount = ethers.parseUnits("7", 18);
     const destinationHash = b32("dest-cancel");
-
     const before = await token.balanceOf(user.address);
 
     await token.connect(user).approve(await gateway.getAddress(), amount);
-    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
-    const rc = await tx.wait();
 
-    const evt = rc!.logs.map((l: any) => {
-      try { return gateway.interface.parseLog(l); } catch { return null; }
-    }).find((x: any) => x && x.name === "RedemptionRequested");
-    const requestId = evt!.args.requestId as string;
+    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
+    const receipt = requireReceipt(await tx.wait());
+    const requestId = getRequestIdFromReceipt(gateway, receipt);
 
     await expect(gateway.connect(user).cancelRedemption(requestId))
       .to.emit(gateway, "RedemptionCancelled")
@@ -105,7 +225,7 @@ describe("RedemptionGateway", function () {
     expect(after).to.equal(before);
 
     const req = await gateway.getRequest(requestId);
-    expect(req.status).to.equal(2); // Cancelled
+    expect(req.status).to.equal(2n);
   });
 
   it("operator can reject and tokens return to requester", async function () {
@@ -114,14 +234,13 @@ describe("RedemptionGateway", function () {
     const amount = ethers.parseUnits("11", 18);
     const destinationHash = b32("dest-reject");
     const reasonHash = b32("kyc-fail");
-
     const before = await token.balanceOf(user.address);
 
     await token.connect(user).approve(await gateway.getAddress(), amount);
-    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
-    const rc = await tx.wait();
 
-    const requestId = getRequestIdFromReceipt(gateway, rc!);
+    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
+    const receipt = requireReceipt(await tx.wait());
+    const requestId = getRequestIdFromReceipt(gateway, receipt);
 
     await expect(gateway.connect(operator).rejectRedemption(requestId, reasonHash))
       .to.emit(gateway, "RedemptionRejected");
@@ -130,7 +249,7 @@ describe("RedemptionGateway", function () {
     expect(after).to.equal(before);
 
     const req = await gateway.getRequest(requestId);
-    expect(req.status).to.equal(3); // Rejected
+    expect(req.status).to.equal(3n);
     expect(req.decisionRef).to.equal(reasonHash);
     expect(req.decidedBy).to.equal(operator.address);
   });
@@ -141,27 +260,24 @@ describe("RedemptionGateway", function () {
     const amount = ethers.parseUnits("9", 18);
     const destinationHash = b32("dest-fulfill");
     const fulfillmentRef = b32("ship-123");
-
     const supplyBefore = await token.totalSupply();
 
     await token.connect(user).approve(await gateway.getAddress(), amount);
-    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
-    const rc = await tx.wait();
 
-    const requestId = getRequestIdFromReceipt(gateway, rc!);
+    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
+    const receipt = requireReceipt(await tx.wait());
+    const requestId = getRequestIdFromReceipt(gateway, receipt);
 
     await expect(gateway.connect(operator).fulfillRedemption(requestId, fulfillmentRef))
       .to.emit(gateway, "RedemptionFulfilled");
 
-    // burned: totalSupply decreases by amount
     const supplyAfter = await token.totalSupply();
     expect(supplyAfter).to.equal(supplyBefore - amount);
 
-    // gateway should not hold the escrow anymore
     expect(await token.balanceOf(await gateway.getAddress())).to.equal(0n);
 
     const req = await gateway.getRequest(requestId);
-    expect(req.status).to.equal(4); // Fulfilled
+    expect(req.status).to.equal(4n);
     expect(req.decisionRef).to.equal(fulfillmentRef);
   });
 
@@ -174,13 +290,17 @@ describe("RedemptionGateway", function () {
     const fulfillmentRef = b32("nope2");
 
     await token.connect(user).approve(await gateway.getAddress(), amount);
+
     const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
-    const rc = await tx.wait();
+    const receipt = requireReceipt(await tx.wait());
+    const requestId = getRequestIdFromReceipt(gateway, receipt);
 
-    const requestId = getRequestIdFromReceipt(gateway, rc!);
-
-    await expect(gateway.connect(other).rejectRedemption(requestId, reasonHash)).to.revert(ethers);
-    await expect(gateway.connect(other).fulfillRedemption(requestId, fulfillmentRef)).to.revert(ethers);
+    await expect(gateway.connect(other).rejectRedemption(requestId, reasonHash)).to.revert(
+      ethers
+    );
+    await expect(
+      gateway.connect(other).fulfillRedemption(requestId, fulfillmentRef)
+    ).to.revert(ethers);
   });
 
   it("pause blocks request/cancel/reject/fulfill", async function () {
@@ -196,19 +316,25 @@ describe("RedemptionGateway", function () {
     await gateway.connect(pauser).pause();
     expect(await gateway.paused()).to.equal(true);
 
-    await expect(gateway.connect(user).requestRedemption(amount, destinationHash)).to.revert(ethers);
+    await expect(gateway.connect(user).requestRedemption(amount, destinationHash)).to.revert(
+      ethers
+    );
 
-    // unpause, create request, then pause and block cancel/operator actions
     await gateway.connect(pauser).unpause();
+
     const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
-    const rc = await tx.wait();
-    const requestId = getRequestIdFromReceipt(gateway, rc!);
+    const receipt = requireReceipt(await tx.wait());
+    const requestId = getRequestIdFromReceipt(gateway, receipt);
 
     await gateway.connect(pauser).pause();
 
     await expect(gateway.connect(user).cancelRedemption(requestId)).to.revert(ethers);
-    await expect(gateway.connect(operator).rejectRedemption(requestId, reasonHash)).to.revert(ethers);
-    await expect(gateway.connect(operator).fulfillRedemption(requestId, fulfillmentRef)).to.revert(ethers);
+    await expect(gateway.connect(operator).rejectRedemption(requestId, reasonHash)).to.revert(
+      ethers
+    );
+    await expect(
+      gateway.connect(operator).fulfillRedemption(requestId, fulfillmentRef)
+    ).to.revert(ethers);
   });
 
   it("cannot cancel if not requester; cannot cancel/reject/fulfill in wrong status", async function () {
@@ -220,33 +346,18 @@ describe("RedemptionGateway", function () {
     const fulfillmentRef = b32("fulfill");
 
     await token.connect(user).approve(await gateway.getAddress(), amount);
-    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
-    const rc = await tx.wait();
-    const requestId = getRequestIdFromReceipt(gateway, rc!);
 
-    // other cannot cancel
+    const tx = await gateway.connect(user).requestRedemption(amount, destinationHash);
+    const receipt = requireReceipt(await tx.wait());
+    const requestId = getRequestIdFromReceipt(gateway, receipt);
+
     await expect(gateway.connect(other).cancelRedemption(requestId)).to.revert(ethers);
 
-    // operator rejects
     await gateway.connect(operator).rejectRedemption(requestId, reasonHash);
 
-    // now cannot cancel / fulfill again
     await expect(gateway.connect(user).cancelRedemption(requestId)).to.revert(ethers);
-    await expect(gateway.connect(operator).fulfillRedemption(requestId, fulfillmentRef)).to.revert(ethers);
+    await expect(
+      gateway.connect(operator).fulfillRedemption(requestId, fulfillmentRef)
+    ).to.revert(ethers);
   });
 });
-
-function getRequestIdFromReceipt(gateway: any, rc: any): string {
-  const evt = rc.logs
-    .map((l: any) => {
-      try { return gateway.interface.parseLog(l); } catch { return null; }
-    })
-    .find((x: any) => x && x.name === "RedemptionRequested");
-  if (!evt) throw new Error("RedemptionRequested event not found");
-  return evt.args.requestId as string;
-}
-
-async function getLatestTimestamp(): Promise<number> {
-  const b = await ethers.provider.getBlock("latest");
-  return Number(b?.timestamp ?? 0);
-}
