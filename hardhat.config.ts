@@ -1,5 +1,21 @@
+import fs from "node:fs";
+import path from "node:path";
+import { loadEnvFile } from "node:process";
 import { defineConfig } from "hardhat/config";
 import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
+
+function tryLoadEnvFile(): void {
+  const explicit = (process.env.ENV_FILE || "").trim();
+  const candidate = explicit
+    ? (path.isAbsolute(explicit) ? explicit : path.join(process.cwd(), explicit))
+    : path.join(process.cwd(), ".env");
+
+  if (!fs.existsSync(candidate)) return;
+
+  loadEnvFile(candidate);
+}
+
+tryLoadEnvFile();
 
 function envStr(key: string): string {
   return (process.env[key] ?? "").trim();
@@ -27,8 +43,12 @@ const mainnetPk = normalizePrivateKey(
   envFirst(["MAINNET_PRIVATE_KEY", "PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY"])
 );
 
-// URL yoksa network'ü hiç tanımlama.
-// Böylece local compile/test, RPC URL zorunluluğu olmadan ayağa kalkar.
+const etherscanApiKey = envFirst([
+  "ETHERSCAN_API_KEY",
+  "ETHERSCAN_API_KEY_SEPOLIA",
+  "ETHERSCAN_API_KEY_MAINNET",
+]);
+
 const networks = {
   ...(sepoliaUrl
     ? {
@@ -73,6 +93,16 @@ export default defineConfig({
   },
 
   ...(Object.keys(networks).length > 0 ? { networks } : {}),
+
+  ...(etherscanApiKey
+    ? {
+        verify: {
+          etherscan: {
+            apiKey: etherscanApiKey,
+          },
+        },
+      }
+    : {}),
 
   test: {
     mocha: {

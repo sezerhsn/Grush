@@ -1,8 +1,8 @@
 /* eslint-disable no-console */
 import fs from "node:fs";
 import path from "node:path";
-import hre from "hardhat";
-import { network } from "hardhat";
+import hre, { network } from "hardhat";
+import { verifyContract } from "@nomicfoundation/hardhat-verify/verify";
 
 type ContractEntry = {
   address: string;
@@ -18,16 +18,6 @@ type EthersLike = {
   provider: {
     getNetwork: () => Promise<{ chainId: bigint }>;
   };
-};
-
-type VerifyTaskArgs = {
-  address: string;
-  constructorArguments: unknown[];
-  contract: string;
-};
-
-type VerifyTaskRunner = {
-  run: (taskName: string, taskArgs: VerifyTaskArgs) => Promise<unknown>;
 };
 
 function errorMessage(err: unknown): string {
@@ -123,22 +113,25 @@ async function assertMainnet(ethers: EthersLike): Promise<number> {
   return chainId;
 }
 
-async function runVerifyTask(taskArgs: VerifyTaskArgs): Promise<void> {
-  const runner = hre as unknown as VerifyTaskRunner;
-  await runner.run("verify:verify", taskArgs);
+async function runVerifyTask(address: string, args: unknown[]): Promise<void> {
+  await verifyContract(
+    {
+      address,
+      constructorArgs: args,
+      provider: "etherscan",
+    },
+    hre
+  );
 }
 
 async function verifyOne(
   label: string,
   entry: ContractEntry,
-  defaultFqn: string,
   ethers: EthersLike
 ): Promise<void> {
   const address = normAddr(ethers, entry.address, `${label}.address`);
   const args = entry.args ?? [];
   validateConstructorArgs(ethers, label, args);
-
-  const contract = entry.contract ?? defaultFqn;
 
   console.log(
     JSON.stringify(
@@ -146,7 +139,6 @@ async function verifyOne(
         step: "verify",
         label,
         address,
-        contract,
         argsCount: args.length,
       },
       null,
@@ -155,12 +147,7 @@ async function verifyOne(
   );
 
   try {
-    await runVerifyTask({
-      address,
-      constructorArguments: args,
-      contract,
-    });
-
+    await runVerifyTask(address, args);
     console.log(JSON.stringify({ ok: true, label, address }, null, 2));
   } catch (err: unknown) {
     const msg = errorMessage(err);
@@ -219,19 +206,9 @@ async function main(): Promise<void> {
     )
   );
 
-  await verifyOne("GRUSHToken", token, "contracts/src/GRUSHToken.sol:GRUSHToken", ethers);
-  await verifyOne(
-    "ReserveRegistry",
-    registry,
-    "contracts/src/ReserveRegistry.sol:ReserveRegistry",
-    ethers
-  );
-  await verifyOne(
-    "RedemptionGateway",
-    gateway,
-    "contracts/src/RedemptionGateway.sol:RedemptionGateway",
-    ethers
-  );
+  await verifyOne("GRUSHToken", token, ethers);
+  await verifyOne("ReserveRegistry", registry, ethers);
+  await verifyOne("RedemptionGateway", gateway, ethers);
 
   console.log(JSON.stringify({ ok: true, chainId, chainKey }, null, 2));
 }
